@@ -20,8 +20,8 @@ import '../services/notification_service.dart';
 import '../theme/anime_theme.dart';
 
 class AppState extends ChangeNotifier {
-  static String appVersion = '1.0.0';
-  static int appBuildNumber = 1;
+  static String appVersion = '1.0.1';
+  static int appBuildNumber = 2;
   static bool _hasCheckedUpdateThisSession = false;
 
   static const MethodChannel _safBackupChannel =
@@ -37,6 +37,7 @@ class AppState extends ChangeNotifier {
   bool _isDarkMode = true;
   bool _isPureBlackDarkMode = false;
   double _textScaleFactor = 1.0;
+  bool _devTestMode = false;
 
   // Commute Stations State (Defaults: NY Penn = Work, Metropark = Home)
   String _workStationCode = 'NY';
@@ -51,12 +52,15 @@ class AppState extends ChangeNotifier {
   String _cachedNjtToken = '';
   DateTime? _cachedNjtTokenTime;
 
-  // Upcoming Trains & Track Watcher
+  // Upcoming Trains & Track Watcher + Smart 5-Second Polling
   List<TrainTrip> _upcomingTrains = [];
   bool _isLoadingTrains = false;
   DateTime? _lastScheduleRefresh;
   String? _watchedTrainId;
   Timer? _schedulePollTimer;
+  bool _isAppFocused = true;
+  int _pollCountdownSeconds = 5;
+  bool _isPollInFlight = false;
 
   // Active Ride & Hybrid GPS + API State
   TrainTrip? _activeRideTrain;
@@ -66,6 +70,7 @@ class AppState extends ChangeNotifier {
   double? _distanceToDestinationMeters;
   double _segmentProgress = 0.0; // 0.0..1.0 between currentStop and nextStop
   String _lastTrackingSignalSource = 'Schedule + GPS Ready';
+  DateTime _lastRideUpdateDateTime = DateTime.now();
   StreamSubscription<Position>? _gpsSubscription;
   Timer? _simulationTimer;
   bool _isAutoSimulating = false;
@@ -87,6 +92,7 @@ class AppState extends ChangeNotifier {
   bool get isDarkMode => _isDarkMode;
   bool get isPureBlackDarkMode => _isPureBlackDarkMode;
   double get textScaleFactor => _textScaleFactor;
+  bool get devTestMode => _devTestMode;
 
   AnimeThemePalette get palette => AnimeThemePalette.resolve(
         themeStyle: _animeThemeStyle,
@@ -112,9 +118,18 @@ class AppState extends ChangeNotifier {
   bool get hasActiveNjtToken => _cachedNjtToken.trim().isNotEmpty;
 
   List<TrainTrip> get upcomingTrains => _upcomingTrains;
+  List<TrainTrip> get upcomingScheduleTrains =>
+      _upcomingTrains.where((t) => !t.isRecentPastDeparture).toList();
+  List<TrainTrip> get recentDepartedTrains =>
+      _upcomingTrains.where((t) => t.isRecentPastDeparture).toList();
+
   bool get isLoadingTrains => _isLoadingTrains;
   DateTime? get lastScheduleRefresh => _lastScheduleRefresh;
   String? get watchedTrainId => _watchedTrainId;
+  bool get isAppFocused => _isAppFocused;
+  int get pollCountdownSeconds => _pollCountdownSeconds;
+  bool get isPollingActive =>
+      _isAppFocused || _watchedTrainId != null || _activeRideTrain != null;
 
   TrainTrip? get activeRideTrain => _activeRideTrain;
   bool get isRiding => _activeRideTrain != null;
@@ -124,6 +139,7 @@ class AppState extends ChangeNotifier {
   double? get distanceToDestinationMeters => _distanceToDestinationMeters;
   double get segmentProgress => _segmentProgress;
   String get lastTrackingSignalSource => _lastTrackingSignalSource;
+  DateTime get lastRideUpdateDateTime => _lastRideUpdateDateTime;
   bool get isAutoSimulating => _isAutoSimulating;
 
   NotificationRules get notificationRules => _notificationRules;
@@ -176,6 +192,8 @@ class AppState extends ChangeNotifier {
     _textScaleFactor =
         (_settingsBox.get('text_scale_factor', defaultValue: 1.0) as num)
             .toDouble();
+    _devTestMode =
+        _settingsBox.get('dev_test_mode', defaultValue: false) as bool;
 
     _workStationCode =
         _settingsBox.get('work_station_code', defaultValue: 'NY') as String;
@@ -250,9 +268,42 @@ class AppState extends ChangeNotifier {
 
   void _startPeriodicSchedulePoll() {
     _schedulePollTimer?.cancel();
-    _schedulePollTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      refreshSchedules(silent: true);
+    _pollCountdownSeconds = 5;
+    _schedulePollTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      // Guardrail: Only poll when app is open & focused, OR user has an active Track Watch, OR user confirmed they're on a train.
+      if (!isPollingActive) {
+        return;
+      }
+      if (_isPollInFlight) return;
+
+      if (_pollCountdownSeconds > 1) {
+        _pollCountdownSeconds--;
+        notifyListeners();
+      } else {
+        _pollCountdownSeconds = 5;
+        refreshSchedules(silent: true);
+      }
     });
+  }
+
+  void setAppFocused(bool focused) {
+    if (_isAppFocused == focused) return;
+    _isAppFocused = focused;
+    if (focused) {
+      _pollCountdownSeconds = 5;
+      refreshSchedules(silent: true);
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> setDevTestMode(bool val) async {
+    _devTestMode = val;
+    await _settingsBox.put('dev_test_mode', val);
+    if (!val && _isAutoSimulating) {
+      stopAutoSimulate();
+    }
+    notifyListeners();
   }
 
   // --- Theme Controls ---
@@ -420,55 +471,80 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> refreshSchedules({bool silent = false}) async {
+    if (_isPollInFlight && silent) return;
+    _isPollInFlight = true;
+    _pollCountdownSeconds = 5;
     if (!silent) {
       _isLoadingTrains = true;
       notifyListeners();
     }
 
-    final token = await _getValidNjtToken();
-    final previousTrains = List<TrainTrip>.from(_upcomingTrains);
+    try {
+      final token = await _getValidNjtToken();
+      final previousTrains = List<TrainTrip>.from(_upcomingTrains);
 
-    final fetched = await NjtApiService.fetchUpcomingTrains(
-      originCode: _originStationCode,
-      destinationCode: _destinationStationCode,
-      cachedToken: token,
-    );
+      final fetched = await NjtApiService.fetchUpcomingTrains(
+        originCode: _originStationCode,
+        destinationCode: _destinationStationCode,
+        cachedToken: token,
+      );
 
-    // Preserve any simulated track announcements on matching train IDs
-    final merged = fetched.map((t) {
-      final prev = previousTrains.where((p) => p.trainId == t.trainId).firstOrNull;
-      if (prev != null && prev.hasTrack && !t.hasTrack) {
-        return t.copyWith(track: prev.track, status: prev.status);
+      // Preserve any simulated track announcements on matching train IDs
+      final merged = fetched.map((t) {
+        final prev =
+            previousTrains.where((p) => p.trainId == t.trainId).firstOrNull;
+        if (prev != null && prev.hasTrack && !t.hasTrack) {
+          return t.copyWith(track: prev.track, status: prev.status);
+        }
+        return t;
+      }).toList();
+
+      // Check watched train track announcement & departure guardrail
+      if (_watchedTrainId != null) {
+        final watchedPrev = previousTrains
+            .where((p) => p.trainId == _watchedTrainId)
+            .firstOrNull;
+        final watchedNow =
+            merged.where((p) => p.trainId == _watchedTrainId).firstOrNull;
+
+        if (watchedNow != null) {
+          // Guardrail: If the watched train already departed origin and user hasn't confirmed boarding, stop watching/polling it
+          if (_activeRideTrain == null &&
+              watchedNow.hasDepartedOrigin(DateTime.now())) {
+            final departedId = watchedNow.trainId;
+            _watchedTrainId = null;
+            NotificationService.showCommuteAlert(
+              type: 'info',
+              title: '🚉 Train #$departedId Departed ${originStation.shortName}',
+              body:
+                  'Track watch paused automatically since Train #$departedId has departed. If you boarded it, tap "I\'m on this!" under Just Departed.',
+              vibrate: false,
+            );
+          } else if (watchedNow.hasTrack &&
+              (watchedPrev == null || !watchedPrev.hasTrack)) {
+            _fireTrackAnnouncedAlert(watchedNow);
+          }
+        }
       }
-      return t;
-    }).toList();
 
-    // Check if our watched train just got its track announced!
-    if (_watchedTrainId != null) {
-      final watchedPrev =
-          previousTrains.where((p) => p.trainId == _watchedTrainId).firstOrNull;
-      final watchedNow =
-          merged.where((p) => p.trainId == _watchedTrainId).firstOrNull;
-      if (watchedNow != null &&
-          watchedNow.hasTrack &&
-          (watchedPrev == null || !watchedPrev.hasTrack)) {
-        _fireTrackAnnouncedAlert(watchedNow);
+      // If currently riding a train, also sync API stop departures if reported
+      if (_activeRideTrain != null) {
+        final liveMatch = merged
+            .where((t) => t.trainId == _activeRideTrain!.trainId)
+            .firstOrNull;
+        if (liveMatch != null) {
+          _syncActiveRideFromApi(liveMatch);
+        }
+        _lastRideUpdateDateTime = DateTime.now();
       }
+
+      _upcomingTrains = merged;
+      _isLoadingTrains = false;
+      _lastScheduleRefresh = DateTime.now();
+    } finally {
+      _isPollInFlight = false;
+      notifyListeners();
     }
-
-    // If currently riding a train, also sync API stop departures if reported
-    if (_activeRideTrain != null) {
-      final liveMatch =
-          merged.where((t) => t.trainId == _activeRideTrain!.trainId).firstOrNull;
-      if (liveMatch != null) {
-        _syncActiveRideFromApi(liveMatch);
-      }
-    }
-
-    _upcomingTrains = merged;
-    _isLoadingTrains = false;
-    _lastScheduleRefresh = DateTime.now();
-    notifyListeners();
   }
 
   // --- Track Watcher ---
@@ -534,21 +610,34 @@ class AppState extends ChangeNotifier {
     stopAutoSimulate();
     _activeRideTrain = trip;
     _watchedTrainId = null;
-    _currentStopIndex = 0;
-    _segmentProgress = 0.0;
+
+    final stops = activeCommuteStops;
+    int initialStopIdx = 0;
+    if (trip.isRecentPastDeparture && stops.length > 2) {
+      int passedCount = 0;
+      for (int i = 0; i < stops.length - 1; i++) {
+        if (stops[i].departed) passedCount = i;
+      }
+      initialStopIdx = passedCount.clamp(0, stops.length - 2);
+    }
+
+    _currentStopIndex = initialStopIdx;
+    _segmentProgress = trip.isRecentPastDeparture ? 0.35 : 0.0;
     _notifiedStopIndices.clear();
     _hasFiredWakeUpAlarm = false;
-    _lastTrackingSignalSource = 'Boarded at ${originStation.shortName}';
+    _lastRideUpdateDateTime = DateTime.now();
+    _lastTrackingSignalSource = trip.isRecentPastDeparture
+        ? 'Joined en-route (${trip.status})'
+        : 'Boarded at ${originStation.shortName}';
 
-    // Initialize distances from origin station coordinates
-    final stops = activeCommuteStops;
+    // Initialize distances from current station coordinates
     if (stops.length > 1) {
-      final orig = stops.first;
-      final next = stops[1];
+      final curr = stops[_currentStopIndex];
+      final next = stops[(_currentStopIndex + 1).clamp(0, stops.length - 1)];
       final dest = stops.last;
-      _distanceToNextStopMeters = getStationByCode(orig.stationCode)
+      _distanceToNextStopMeters = getStationByCode(curr.stationCode)
           .distanceMetersTo(next.latitude, next.longitude);
-      _distanceToDestinationMeters = getStationByCode(orig.stationCode)
+      _distanceToDestinationMeters = getStationByCode(curr.stationCode)
           .distanceMetersTo(dest.latitude, dest.longitude);
     }
 
@@ -589,6 +678,7 @@ class AppState extends ChangeNotifier {
 
   void _onGpsPositionUpdate(Position pos) {
     _currentGpsPosition = pos;
+    _lastRideUpdateDateTime = DateTime.now();
     if (_activeRideTrain == null) {
       notifyListeners();
       return;
@@ -671,6 +761,7 @@ class AppState extends ChangeNotifier {
     _currentStopIndex = clamped;
     _segmentProgress = 0.0;
     _lastTrackingSignalSource = source;
+    _lastRideUpdateDateTime = DateTime.now();
 
     // Update synthetic distances when advancing stops
     final currentSt = stops[_currentStopIndex];
@@ -1145,14 +1236,243 @@ class AppState extends ChangeNotifier {
     await importFromJson(decoded);
   }
 
+  /// Calculates storage usage of local/SAF backups matching mygo2.
+  Future<Map<String, int>> getStorageStats() async {
+    int backupFiles = 0;
+    int backupBytes = 0;
+
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      final backupDir =
+          Directory('${docDir.path}${Platform.pathSeparator}backups');
+      if (await backupDir.exists()) {
+        await for (final entity in backupDir.list()) {
+          if (entity is File && entity.path.endsWith('.json')) {
+            backupFiles++;
+            backupBytes += await entity.length();
+          }
+        }
+      }
+
+      if (!kIsWeb && Platform.isAndroid && safBackupDirectoryUri.isNotEmpty) {
+        try {
+          final res =
+              await _safBackupChannel.invokeMethod<Map<dynamic, dynamic>>(
+            'getBackupDirectoryStats',
+            {'treeUri': safBackupDirectoryUri},
+          );
+          if (res != null && res['success'] == true) {
+            final folderCount = (res['fileCount'] as num?)?.toInt() ?? 0;
+            final folderBytes = (res['totalBytes'] as num?)?.toInt() ?? 0;
+            if (folderCount > 0 || folderBytes > 0) {
+              backupFiles = folderCount;
+              backupBytes = folderBytes;
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+
+    return {
+      'backupFiles': backupFiles,
+      'backupBytes': backupBytes,
+    };
+  }
+
+  /// Opens the "What's new" release notes bottom sheet matching mygo2.
+  Future<void> showWhatsNew(BuildContext context) async {
+    final repo = githubRepoPath.trim();
+    if (repo.isEmpty) return;
+
+    try {
+      final headers = {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'my5top-app',
+      };
+      if (githubToken.trim().isNotEmpty) {
+        headers['Authorization'] = 'Bearer ${githubToken.trim()}';
+      }
+      final url = 'https://api.github.com/repos/$repo/releases';
+      final response = await http.get(Uri.parse(url), headers: headers);
+      if (response.statusCode == 200) {
+        final List data = json.decode(response.body);
+        if (data.isNotEmpty && context.mounted) {
+          final latestRelease = data[0];
+          final rawTagName =
+              (latestRelease['tag_name'] as String? ?? 'v$appVersion').trim();
+          final releaseTitle =
+              (latestRelease['name'] as String? ?? 'What\'s New').trim();
+          final releaseNotes =
+              (latestRelease['body'] as String? ?? 'No release notes provided.')
+                  .trim();
+          final releaseUrl = (latestRelease['html_url'] as String? ??
+                  'https://github.com/$repo/releases')
+              .trim();
+
+          await showModalBottomSheet(
+            context: context,
+            isScrollControlled: true,
+            backgroundColor: Colors.transparent,
+            builder: (ctx) {
+              final dark = isDarkMode;
+              final bg = dark
+                  ? (isPureBlackDarkMode
+                      ? Colors.black
+                      : const Color(0xFF0F172A))
+                  : Colors.white;
+              return Container(
+                height: MediaQuery.of(ctx).size.height * 0.85,
+                decoration: BoxDecoration(
+                  color: bg,
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(24)),
+                  border:
+                      Border.all(color: dark ? Colors.white12 : Colors.black12),
+                ),
+                child: SafeArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          margin: const EdgeInsets.only(top: 12, bottom: 8),
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: dark ? Colors.white24 : Colors.black26,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.new_releases_outlined,
+                              color: palette.primaryAccent,
+                              size: 28,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'What\'s new',
+                                    style: TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.bold,
+                                      color:
+                                          dark ? Colors.white : Colors.black87,
+                                    ),
+                                  ),
+                                  Text(
+                                    '$rawTagName • $releaseTitle',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: dark
+                                          ? Colors.white60
+                                          : Colors.black54,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: () => Navigator.of(ctx).pop(),
+                              icon: Icon(
+                                Icons.close,
+                                color: dark ? Colors.white70 : Colors.black54,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Divider(
+                          height: 1,
+                          color: dark ? Colors.white12 : Colors.black12),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(20),
+                          child: SelectableText(
+                            releaseNotes,
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              height: 1.55,
+                              color: dark
+                                  ? Colors.white.withOpacity(0.88)
+                                  : Colors.black87,
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () async {
+                                  if (await canLaunchUrl(
+                                      Uri.parse(releaseUrl))) {
+                                    await launchUrl(
+                                      Uri.parse(releaseUrl),
+                                      mode: LaunchMode.externalApplication,
+                                    );
+                                  }
+                                },
+                                icon: const Icon(Icons.open_in_new, size: 16),
+                                label: const Text('View on GitHub'),
+                                style: OutlinedButton.styleFrom(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: ElevatedButton(
+                                onPressed: () => Navigator.of(ctx).pop(),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: palette.primaryAccent,
+                                  foregroundColor: Colors.black,
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Done',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        }
+      }
+    } catch (_) {}
+  }
+
   // --- GITHUB RELEASES APK SELF-UPDATER (Matching mygo2) ---
-  String get githubRepoPath => _settingsBox.get(
-        'github_repo_path',
-        defaultValue: 'hsoj1092/my5top',
-      ) as String;
+  String get githubRepoPath => 'hsoj1092/my5top';
 
   Future<void> setGithubRepoPath(String path) async {
-    await _settingsBox.put('github_repo_path', path.trim());
+    await _settingsBox.put('github_repo_path', 'hsoj1092/my5top');
     notifyListeners();
   }
 

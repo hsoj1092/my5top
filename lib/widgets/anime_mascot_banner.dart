@@ -133,32 +133,36 @@ class _AnimeMascotBannerState extends State<AnimeMascotBanner>
                           children: [
                             Row(
                               children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 2.5,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: pal.primaryAccent.withOpacity(0.18),
-                                    borderRadius: BorderRadius.circular(99),
-                                  ),
-                                  child: Text(
-                                    '${pal.mascotName} • ${pal.jpTitle}',
-                                    style: TextStyle(
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w700,
-                                      color: pal.primaryAccent,
+                                Flexible(
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 9,
+                                      vertical: 3.5,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: pal.primaryAccent.withOpacity(0.18),
+                                      borderRadius: BorderRadius.circular(99),
+                                    ),
+                                    child: Text(
+                                      '${pal.mascotName} • ${pal.mascotTitle}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: pal.primaryAccent,
+                                      ),
                                     ),
                                   ),
                                 ),
-                                const Spacer(),
+                                const SizedBox(width: 8),
                                 InkWell(
                                   onTap: widget.onToggleThemeStyle,
                                   borderRadius: BorderRadius.circular(99),
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 3,
+                                      horizontal: 10,
+                                      vertical: 4,
                                     ),
                                     decoration: BoxDecoration(
                                       color: pal.secondaryAccent.withOpacity(0.18),

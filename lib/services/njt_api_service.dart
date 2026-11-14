@@ -11,6 +11,23 @@ class NjtApiService {
     final amPm = hour24 >= 12 ? 'PM' : 'AM';
     return '$hour12:$minStr $amPm';
   }
+
+  static String formatTimeHms(DateTime dt) {
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final ss = dt.second.toString().padLeft(2, '0');
+    return '$hh:$mm:$ss';
+  }
+
+  static String formatDateAndTimeHms(DateTime dt) {
+    final y = dt.year.toString().padLeft(4, '0');
+    final m = dt.month.toString().padLeft(2, '0');
+    final d = dt.day.toString().padLeft(2, '0');
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final ss = dt.second.toString().padLeft(2, '0');
+    return '$y-$m-$d $hh:$mm:$ss';
+  }
   static const String _prodBaseUrl =
       'https://raildata.njtransit.com/api/TrainData';
 
@@ -294,15 +311,15 @@ class NjtApiService {
     final bool southbound = orig.necOrder <= dest.necOrder;
     final String finalTerm = southbound ? 'Trenton' : 'NY Penn Station';
 
-    // Define 6 upcoming departures starting in 6, 16, 28, 42, 58, and 75 minutes
-    final offsets = [6, 16, 28, 42, 58, 75];
+    // Define 6 upcoming departures (6, 16, 28, 42, 58, 75m) + 3 recent prior departures (-5, -14, -24m)
+    final offsets = [6, 16, 28, 42, 58, 75, -5, -14, -24];
     final trainIds = southbound
-        ? ['3941', '3843', '3725', '3945', '3847', '3849']
-        : ['3914', '3816', '3712', '3918', '3820', '3822'];
-    final expressFlags = [true, false, true, true, false, false];
+        ? ['3941', '3843', '3725', '3945', '3847', '3849', '3939', '3837', '3721']
+        : ['3914', '3816', '3712', '3918', '3820', '3822', '3912', '3810', '3708'];
+    final expressFlags = [true, false, true, true, false, false, true, false, true];
     final tracks = southbound
-        ? ['9', '7', null, null, null, null] // First 2 have tracks announced, next ones TBA!
-        : ['4', '4', '2', null, null, null];
+        ? ['9', '7', null, null, null, null, '11', '8', '10']
+        : ['4', '4', '2', null, null, null, '4', '1', '3'];
     final statuses = [
       'Boarding',
       'On Time',
@@ -310,13 +327,18 @@ class NjtApiService {
       'On Time',
       'Delayed 3m',
       'On Time',
+      'Departed 5m ago',
+      'Departed 14m ago',
+      'Departed 24m ago',
     ];
 
     final List<TrainTrip> trips = [];
 
     for (int i = 0; i < offsets.length; i++) {
       final isExp = expressFlags[i];
-      final depDt = now.add(Duration(minutes: offsets[i]));
+      final offsetMins = offsets[i];
+      final isPast = offsetMins < 0;
+      final depDt = now.add(Duration(minutes: offsetMins));
 
       // Filter intermediate stops for Express trains (e.g., NY -> SE -> NP -> MP!)
       List<Station> stopStations;
@@ -324,8 +346,8 @@ class NjtApiService {
         const expressCoreCodes = {'NY', 'SE', 'NP', 'NA', 'RA', 'MP', 'NB', 'PJ', 'TR'};
         stopStations = fullChain.where((s) {
           if (s.code == orig.code || s.code == dest.code) return true;
-          // Super express on index 0 skips NA and RA so NY -> SE -> NP -> MP is 3 stops!
-          if (i == 0 && (s.code == 'NA' || s.code == 'RA')) return false;
+          // Super express on index 0 or 6 skips NA and RA so NY -> SE -> NP -> MP is 3 stops!
+          if ((i == 0 || i == 6) && (s.code == 'NA' || s.code == 'RA')) return false;
           return expressCoreCodes.contains(s.code);
         }).toList();
       } else {
@@ -338,14 +360,17 @@ class NjtApiService {
         final st = stopStations[sIdx];
         final stopDt = depDt.add(Duration(minutes: sIdx * minsPerStop));
         final formattedTime = formatTime12h(stopDt);
+        final hasStopDeparted = stopDt.isBefore(now);
         trainStops.add(
           TrainStop(
             stationCode: st.code,
             stationName: st.name,
             scheduledTime: formattedTime,
             estimatedTime: formattedTime,
-            departed: false,
-            stopStatus: statuses[i] == 'Delayed 3m' ? 'Late 3m' : 'On Time',
+            departed: hasStopDeparted,
+            stopStatus: hasStopDeparted
+                ? 'Departed'
+                : (statuses[i] == 'Delayed 3m' ? 'Late 3m' : 'On Time'),
             latitude: st.latitude,
             longitude: st.longitude,
           ),
@@ -361,7 +386,7 @@ class NjtApiService {
         TrainTrip(
           trainId: trainIds[i],
           line: 'Northeast Corridor',
-          lineBadge: isExp ? '新快速 • NEC EXP' : '普通 • NEC LOCAL',
+          lineBadge: isExp ? 'NEC EXPRESS' : 'NEC LOCAL',
           originCode: orig.code,
           destinationCode: dest.code,
           finalDestinationName: finalTerm,
@@ -373,6 +398,8 @@ class NjtApiService {
           isExpress: isExp,
           dataSource: 'NEC Smart Schedule + GPS',
           stops: trainStops,
+          departureDateTime: depDt,
+          isRecentPastDeparture: isPast,
         ),
       );
     }

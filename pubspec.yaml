@@ -1,6 +1,6 @@
 name: my5top
 description: "my5top — Cute/Anime NJ Transit Commute Assistant with hybrid GPS + API stop tracking, Mihon-style JSON backups, and GitHub APK self-updates."
-version: 1.0.0+1
+version: 1.0.1+2
 
 publish_to: 'none'
 

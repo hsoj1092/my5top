@@ -30,6 +30,7 @@ class MainActivity : FlutterActivity() {
     private var pendingSafResult: MethodChannel.Result? = null
     private var pendingBackupBytes: ByteArray? = null
     private var pendingBackupFilePath: String? = null
+    private var requestedNotifOnResume = false
 
     companion object {
         private const val REQUEST_CREATE_BACKUP = 9001
@@ -158,6 +159,25 @@ class MainActivity : FlutterActivity() {
             nm.createNotificationChannels(
                 listOf(rideChannel, stopChannel, trackChannel, arrivalChannel)
             )
+        }
+    }
+
+    override fun onPostResume() {
+        super.onPostResume()
+        if (!requestedNotifOnResume) {
+            requestedNotifOnResume = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val perm = "android.permission.POST_NOTIFICATIONS"
+                if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+                    window?.decorView?.postDelayed({
+                        try {
+                            if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+                                requestPermissions(arrayOf(perm), REQUEST_NOTIF_PERMISSION)
+                            }
+                        } catch (_: Throwable) {}
+                    }, 500)
+                }
+            }
         }
     }
 

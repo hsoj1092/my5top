@@ -5,6 +5,7 @@ import '../models/station.dart';
 import '../models/train_trip.dart';
 import '../providers/app_state.dart';
 import '../providers/backup_provider.dart';
+import '../services/njt_api_service.dart';
 import '../services/notification_service.dart';
 import '../widgets/anime_mascot_banner.dart';
 import 'active_ride_screen.dart';
@@ -17,15 +18,17 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   InAppAlertEvent? _latestBannerAlert;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     NotificationService.addAlertListener(_onInAppAlert);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      NotificationService.requestPermission();
       final appState = context.read<AppState>();
       context.read<BackupProvider>().checkAndRunAutoBackup(appState);
       appState.checkAndRunDailyUpdate(context);
@@ -34,8 +37,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     NotificationService.removeAlertListener(_onInAppAlert);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    final appState = context.read<AppState>();
+    appState.setAppFocused(state == AppLifecycleState.resumed);
   }
 
   void _onInAppAlert(InAppAlertEvent evt) {
@@ -72,6 +83,12 @@ class _HomeScreenState extends State<HomeScreen> {
             orig.code == appState.workStationCode;
         final isHeadingToWork = dest.code == appState.workStationCode &&
             orig.code == appState.homeStationCode;
+
+        final upcomingList = appState.upcomingScheduleTrains;
+        final recentDepartedList = appState.recentDepartedTrains;
+        final lastCheckedStr = appState.lastScheduleRefresh != null
+            ? NjtApiService.formatTimeHms(appState.lastScheduleRefresh!)
+            : '--:--:--';
 
         return Scaffold(
           backgroundColor: pal.scaffoldBg,
@@ -145,7 +162,12 @@ class _HomeScreenState extends State<HomeScreen> {
               color: pal.primaryAccent,
               onRefresh: () => appState.refreshSchedules(),
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  8,
+                  16,
+                  32 + MediaQuery.paddingOf(context).bottom,
+                ),
                 children: [
                   // 1. Live In-App Notification Toast Banner (when an alert fires)
                   if (_latestBannerAlert != null) ...[
@@ -308,7 +330,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                   // 4. 1-Tap Commute Route Selector (Work NY Penn <-> Home Metropark)
                   Container(
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
                       color: pal.cardBg,
                       borderRadius: BorderRadius.circular(24),
@@ -317,7 +339,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Quick Preset Pills (To Home / To Work)
+                        // Quick Preset Pills (To Home / To Work) - balanced padding so labels never clip
                         Row(
                           children: [
                             Expanded(
@@ -442,7 +464,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               const SizedBox(width: 8),
                               _buildRuleChip(
                                 icon: Icons.track_changes_rounded,
-                                text: 'Track Drop Alert: ON',
+                                text: rules.notifyOnTrackAssigned
+                                    ? 'Track Drop Alert: ON'
+                                    : 'Track Drop Alert: OFF',
                                 color: pal.trackBadgeBg,
                                 onTap: () => _showQuickRulesSheet(context),
                               ),
@@ -452,9 +476,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 16),
 
-                  // 5. Section Header: DepartureVision Board
+                  // 5. Section Header: Upcoming Trains + Live 5s Poll Accuracy Bar
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -476,27 +500,94 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ],
                       ),
-                      Text(
-                        'Tap train to board',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: pal.textSecondary,
+                      InkWell(
+                        onTap: () => appState.refreshSchedules(),
+                        borderRadius: BorderRadius.circular(99),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: pal.cardBg,
+                            borderRadius: BorderRadius.circular(99),
+                            border: Border.all(color: pal.cardBorder),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.sync_rounded,
+                                size: 12,
+                                color: appState.isPollingActive
+                                    ? pal.successColor
+                                    : pal.textSecondary,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                '$lastCheckedStr • ${appState.isPollingActive ? "${appState.pollCountdownSeconds}s" : "Idle"}',
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w700,
+                                  color: pal.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 10),
 
-                  if (appState.isLoadingTrains &&
-                      appState.upcomingTrains.isEmpty)
+                  if (appState.isLoadingTrains && upcomingList.isEmpty)
                     const Padding(
                       padding: EdgeInsets.all(32),
                       child: Center(child: CircularProgressIndicator()),
                     )
                   else
-                    ...appState.upcomingTrains.map(
+                    ...upcomingList.map(
                       (trip) => _buildTrainCard(context, appState, trip),
                     ),
+
+                  // 6. Just Departed (2-3 Prior Departures) at the bottom so user can still select & check in!
+                  if (recentDepartedList.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.history_toggle_off_rounded,
+                              size: 18,
+                              color: pal.secondaryAccent,
+                            ),
+                            const SizedBox(width: 7),
+                            Text(
+                              'Just Departed (${orig.code} → ${dest.code})',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                color: pal.textPrimary,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          'Already on board? Tap to track',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: pal.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    ...recentDepartedList.map(
+                      (trip) => _buildTrainCard(context, appState, trip),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -518,12 +609,12 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(14),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         decoration: BoxDecoration(
-          color: selected ? accent.withOpacity(0.20) : Colors.transparent,
+          color: selected ? accent.withOpacity(0.18) : Colors.transparent,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: selected ? accent : accent.withOpacity(0.25),
+            color: selected ? accent : accent.withOpacity(0.28),
             width: selected ? 1.6 : 1.0,
           ),
         ),
@@ -533,14 +624,17 @@ class _HomeScreenState extends State<HomeScreen> {
             Icon(icon, size: 15, color: accent),
             const SizedBox(width: 6),
             Flexible(
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: textColor,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: textColor,
+                  ),
                 ),
-                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
@@ -600,7 +694,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             Text(
-              '${station.code} • ${station.jpBadge}',
+              '${station.code} • ${station.line}',
               style: TextStyle(
                 fontSize: 10.5,
                 color: pal.textSecondary,
@@ -623,7 +717,7 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(99),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
         decoration: BoxDecoration(
           color: color.withOpacity(0.14),
           borderRadius: BorderRadius.circular(99),
@@ -657,11 +751,19 @@ class _HomeScreenState extends State<HomeScreen> {
     final isWatched = appState.watchedTrainId == trip.trainId;
     final isActiveRide = appState.activeRideTrain?.trainId == trip.trainId;
     final stopCount = trip.totalStopCount;
+    final isExpressCount = trip.isFourOrLessStops;
+
+    // Color-code <= 4 stops to mark Express train clearly
+    final Color stopCountColor = isExpressCount
+        ? (pal.isDark ? const Color(0xFFFBBF24) : const Color(0xFFD97706))
+        : pal.secondaryAccent;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: pal.cardBg,
+        color: trip.isRecentPastDeparture
+            ? pal.cardBg.withOpacity(0.88)
+            : pal.cardBg,
         borderRadius: BorderRadius.circular(22),
         border: Border.all(
           color: isActiveRide
@@ -680,7 +782,7 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Top row: Train # + Express badge + Track Assignment Pill
+              // Top row: Train # + Express/Local badge + Track Assignment Pill
               Row(
                 children: [
                   Container(
@@ -704,21 +806,21 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3.5,
+                      horizontal: 9,
+                      vertical: 4,
                     ),
                     decoration: BoxDecoration(
-                      color: trip.isExpress
+                      color: isExpressCount
                           ? pal.urgentColor.withOpacity(0.16)
                           : pal.secondaryAccent.withOpacity(0.16),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(
-                      trip.lineBadge,
+                      isExpressCount ? '⚡ EXPRESS' : 'LOCAL',
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w800,
-                        color: trip.isExpress
+                        color: isExpressCount
                             ? pal.urgentColor
                             : pal.secondaryAccent,
                       ),
@@ -737,7 +839,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         borderRadius: BorderRadius.circular(10),
                         boxShadow: [
                           BoxShadow(
-                            color: pal.trackBadgeBg.withOpacity(0.35),
+                            color: pal.trackBadgeBg.withOpacity(0.30),
                             blurRadius: 8,
                           ),
                         ],
@@ -762,7 +864,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     )
-                  else
+                  else if (!trip.isRecentPastDeparture)
                     InkWell(
                       onTap: () => appState.toggleWatchTrainTrack(trip),
                       borderRadius: BorderRadius.circular(10),
@@ -813,7 +915,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 12),
 
-              // Middle row: DepartureTime -> ArrivalTime & Stop count
+              // Middle row: DepartureTime -> ArrivalTime & Duration + Status
               Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
@@ -849,7 +951,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
                       Text(
-                        '${trip.durationMinutes} min • $stopCount ${stopCount == 1 ? "stop" : "stops"}',
+                        '${trip.durationMinutes} min',
                         style: TextStyle(
                           fontSize: 12.5,
                           fontWeight: FontWeight.w700,
@@ -863,34 +965,57 @@ class _HomeScreenState extends State<HomeScreen> {
                           fontWeight: FontWeight.w700,
                           color: trip.status.toLowerCase().contains('delay')
                               ? pal.urgentColor
-                              : pal.successColor,
+                              : trip.isRecentPastDeparture
+                                  ? pal.secondaryAccent
+                                  : pal.successColor,
                         ),
                       ),
                     ],
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
 
-              // Bottom row: Stops preview + Quick "I'm on this train!" button
+              // Bottom row: Stop count till destination (color-coded + ⚡ emoji for <= 4 stops) + Boarding button
               Row(
                 children: [
-                  Expanded(
-                    child: Text(
-                      'Stops: ${trip.commuteStops.map((s) => s.stationCode).join(" → ")}',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: pal.textSecondary,
+                  Flexible(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5.5,
                       ),
-                      overflow: TextOverflow.ellipsis,
+                      decoration: BoxDecoration(
+                        color: stopCountColor.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: stopCountColor.withOpacity(0.42),
+                        ),
+                      ),
+                      child: Text(
+                        isExpressCount
+                            ? '⚡ $stopCount ${stopCount == 1 ? "stop" : "stops"} to ${trip.destinationCode} • Express'
+                            : '🚉 $stopCount stops to ${trip.destinationCode}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w800,
+                          color: stopCountColor,
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
-                  if (!trip.hasTrack)
+                  // Hide Sim Track unless Dev Test Mode is enabled in Settings
+                  if (appState.devTestMode && !trip.hasTrack) ...[
                     TextButton.icon(
                       style: TextButton.styleFrom(
                         visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
                       ),
                       onPressed: () =>
                           appState.simulateTrackAnnouncement(trip.trainId),
@@ -908,17 +1033,20 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                     ),
+                    const SizedBox(width: 4),
+                  ],
                   ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
                       backgroundColor: isActiveRide
                           ? pal.successColor
                           : pal.primaryAccent,
                       foregroundColor: const Color(0xFF0F172A),
-                      visualDensity: VisualDensity.compact,
+                      elevation: 0,
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
+                        horizontal: 13,
+                        vertical: 9,
                       ),
+                      minimumSize: const Size(0, 36),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -1139,7 +1267,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 16),
                 Row(
                   children: [
-                    if (!trip.hasTrack) ...[
+                    if (!trip.hasTrack && !trip.isRecentPastDeparture) ...[
                       Expanded(
                         child: OutlinedButton.icon(
                           onPressed: () {
@@ -1272,7 +1400,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           ],
                         ),
                         subtitle: Text(
-                          '${st.line} • ${st.jpBadge}',
+                          st.line,
                           style: TextStyle(
                             fontSize: 11.5,
                             color: pal.textSecondary,
@@ -1373,23 +1501,72 @@ class _HomeScreenState extends State<HomeScreen> {
                         color: pal.textSecondary,
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      children: [1, 2, 3, 4, 5].map((n) {
+                    const SizedBox(height: 10),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [1, 2, 3, 4, 5, 6].map((n) {
                         final sel = rules.startNotifyingStopsAway == n;
-                        return ChoiceChip(
-                          label: Text('$n ${n == 1 ? "stop" : "stops"} away'),
-                          selected: sel,
-                          selectedColor: pal.primaryAccent,
-                          onSelected: (_) {
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () {
                             appState.updateNotificationRules(
                               rules.copyWith(startNotifyingStopsAway: n),
                             );
                           },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 4,
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 32,
+                                  height: 32,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: sel
+                                        ? pal.primaryAccent
+                                        : pal.scaffoldBg,
+                                    border: Border.all(
+                                      color: sel
+                                          ? pal.primaryAccent
+                                          : pal.cardBorder,
+                                      width: 1.8,
+                                    ),
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: Icon(
+                                    sel
+                                        ? Icons.notifications_active
+                                        : Icons.circle,
+                                    size: sel ? 15 : 8,
+                                    color: sel
+                                        ? const Color(0xFF0F172A)
+                                        : pal.textSecondary,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '$n',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: sel
+                                        ? FontWeight.w900
+                                        : FontWeight.w600,
+                                    color: sel
+                                        ? pal.primaryAccent
+                                        : pal.textSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         );
                       }).toList(),
                     ),
+                    const SizedBox(height: 8),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Notify me on every stop'),

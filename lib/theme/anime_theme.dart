@@ -49,7 +49,7 @@ class AnimeThemePalette {
         return AnimeThemePalette(
           id: 'sakura',
           name: 'Sakura Express (Night)',
-          jpTitle: '桜エクスプレス・夜行',
+          jpTitle: 'Sakura Express • Night',
           mascotName: 'Hana-chan',
           mascotTitle: 'Sakura Station Conductor',
           isDark: true,
@@ -69,7 +69,7 @@ class AnimeThemePalette {
       return const AnimeThemePalette(
         id: 'sakura',
         name: 'Sakura Express Pastel',
-        jpTitle: '桜エクスプレス・各駅停車',
+        jpTitle: 'Sakura Express • Day',
         mascotName: 'Hana-chan',
         mascotTitle: 'Sakura Station Conductor',
         isDark: false,
@@ -92,7 +92,7 @@ class AnimeThemePalette {
       return const AnimeThemePalette(
         id: 'mygo',
         name: 'MyGO!!!!! Starry Day',
-        jpTitle: '迷子でもいい、迷子でも進め。',
+        jpTitle: 'Starry Navigator',
         mascotName: 'Tomori-navi',
         mascotTitle: 'Starry Rail Navigator',
         isDark: false,
@@ -113,7 +113,7 @@ class AnimeThemePalette {
     return AnimeThemePalette(
       id: 'mygo',
       name: 'MyGO!!!!! Starry Rain',
-      jpTitle: '迷子でもいい、迷子でも進め。',
+      jpTitle: 'Starry Navigator',
       mascotName: 'Tomori-navi',
       mascotTitle: 'Starry Rail Navigator',
       isDark: true,

@@ -79,11 +79,13 @@ class TrainTrip {
   final String finalDestinationName;
   final String departureTime;
   final String arrivalTime;
+  final DateTime? departureDateTime;
   final int durationMinutes;
   final String status;
   final String? track;
   final bool isExpress;
-  final String dataSource; // 'NJT RailData API', 'DepartureVision Live', 'NEC Smart Schedule'
+  final bool isRecentPastDeparture;
+  final String dataSource;
   final List<TrainStop> stops;
 
   const TrainTrip({
@@ -95,10 +97,12 @@ class TrainTrip {
     required this.finalDestinationName,
     required this.departureTime,
     required this.arrivalTime,
+    this.departureDateTime,
     required this.durationMinutes,
     required this.status,
     this.track,
     required this.isExpress,
+    this.isRecentPastDeparture = false,
     required this.dataSource,
     required this.stops,
   });
@@ -124,6 +128,19 @@ class TrainTrip {
     return slice.length > 1 ? slice.length - 1 : 1;
   }
 
+  /// True when total stops to destination is 4 or fewer (Express).
+  bool get isFourOrLessStops => totalStopCount <= 4;
+
+  /// Checks whether this train has already departed the origin station.
+  bool hasDepartedOrigin(DateTime now) {
+    if (isRecentPastDeparture) return true;
+    if (commuteStops.isNotEmpty && commuteStops.first.departed) return true;
+    if (departureDateTime != null) {
+      return now.isAfter(departureDateTime!.add(const Duration(minutes: 1)));
+    }
+    return false;
+  }
+
   TrainTrip copyWith({
     String? trainId,
     String? line,
@@ -133,10 +150,12 @@ class TrainTrip {
     String? finalDestinationName,
     String? departureTime,
     String? arrivalTime,
+    DateTime? departureDateTime,
     int? durationMinutes,
     String? status,
     String? track,
     bool? isExpress,
+    bool? isRecentPastDeparture,
     String? dataSource,
     List<TrainStop>? stops,
   }) {
@@ -149,10 +168,13 @@ class TrainTrip {
       finalDestinationName: finalDestinationName ?? this.finalDestinationName,
       departureTime: departureTime ?? this.departureTime,
       arrivalTime: arrivalTime ?? this.arrivalTime,
+      departureDateTime: departureDateTime ?? this.departureDateTime,
       durationMinutes: durationMinutes ?? this.durationMinutes,
       status: status ?? this.status,
       track: track ?? this.track,
       isExpress: isExpress ?? this.isExpress,
+      isRecentPastDeparture:
+          isRecentPastDeparture ?? this.isRecentPastDeparture,
       dataSource: dataSource ?? this.dataSource,
       stops: stops ?? this.stops,
     );
@@ -167,10 +189,12 @@ class TrainTrip {
         'finalDestinationName': finalDestinationName,
         'departureTime': departureTime,
         'arrivalTime': arrivalTime,
+        'departureDateTime': departureDateTime?.toIso8601String(),
         'durationMinutes': durationMinutes,
         'status': status,
         'track': track,
         'isExpress': isExpress,
+        'isRecentPastDeparture': isRecentPastDeparture,
         'dataSource': dataSource,
         'stops': stops.map((s) => s.toJson()).toList(),
       };
@@ -186,10 +210,14 @@ class TrainTrip {
       finalDestinationName: (json['finalDestinationName'] ?? 'Trenton').toString(),
       departureTime: (json['departureTime'] ?? '').toString(),
       arrivalTime: (json['arrivalTime'] ?? '').toString(),
+      departureDateTime: json['departureDateTime'] != null
+          ? DateTime.tryParse(json['departureDateTime'].toString())
+          : null,
       durationMinutes: (json['durationMinutes'] as num?)?.toInt() ?? 38,
       status: (json['status'] ?? 'On Time').toString(),
       track: json['track']?.toString(),
       isExpress: json['isExpress'] == true,
+      isRecentPastDeparture: json['isRecentPastDeparture'] == true,
       dataSource: (json['dataSource'] ?? 'NEC Smart Schedule').toString(),
       stops: rawStops
           .map((e) => TrainStop.fromJson(Map<String, dynamic>.from(e as Map)))

@@ -7,8 +7,31 @@ class BackupProvider extends ChangeNotifier {
   String? _errorMessage;
 
   bool get isBusy => _isBusy;
+  bool get isBackingUp => _isBusy;
   String get statusMessage => _statusMessage;
   String? get errorMessage => _errorMessage;
+
+  Future<String?> createBackupNow(AppState appState) async {
+    if (_isBusy) return null;
+    _isBusy = true;
+    _errorMessage = null;
+    _statusMessage = 'Creating backup snapshot...';
+    notifyListeners();
+
+    try {
+      final path = await appState.exportLocalBackupFile();
+      _isBusy = false;
+      _statusMessage = 'Backup created.';
+      notifyListeners();
+      return path;
+    } catch (e) {
+      _isBusy = false;
+      _errorMessage = 'Backup failed: $e';
+      _statusMessage = '';
+      notifyListeners();
+      return null;
+    }
+  }
 
   Future<void> checkAndRunAutoBackup(AppState appState) async {
     final interval = appState.backupInterval;
@@ -22,9 +45,12 @@ class BackupProvider extends ChangeNotifier {
       shouldBackup = true;
     } else {
       final difference = now.difference(lastBackup);
-      if (interval == '3_days' && difference.inDays >= 3) {
+      if (interval == 'daily' && difference.inHours >= 24) {
         shouldBackup = true;
-      } else if (interval == '1_week' && difference.inDays >= 7) {
+      } else if (interval == '3_days' && difference.inDays >= 3) {
+        shouldBackup = true;
+      } else if ((interval == 'weekly' || interval == '1_week') &&
+          difference.inDays >= 7) {
         shouldBackup = true;
       } else if (interval == '2_weeks' && difference.inDays >= 14) {
         shouldBackup = true;

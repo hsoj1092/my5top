@@ -29,12 +29,22 @@ void main() {
       );
 
       expect(toHomeTrips, isNotEmpty);
-      final first = toHomeTrips.first;
+      final upcoming =
+          toHomeTrips.where((t) => !t.isRecentPastDeparture).toList();
+      final recentPast =
+          toHomeTrips.where((t) => t.isRecentPastDeparture).toList();
+      expect(upcoming.length, equals(6));
+      expect(recentPast.length, equals(3));
+
+      final first = upcoming.first;
       expect(first.originCode, 'NY');
       expect(first.destinationCode, 'MP');
       expect(first.commuteStops.first.stationCode, 'NY');
       expect(first.commuteStops.last.stationCode, 'MP');
-      expect(first.totalStopCount, greaterThanOrEqualTo(3));
+      expect(first.totalStopCount, equals(3));
+      expect(first.isFourOrLessStops, isTrue);
+      expect(first.hasDepartedOrigin(now), isFalse);
+      expect(recentPast.first.hasDepartedOrigin(now), isTrue);
 
       final toWorkTrips = NjtApiService.generateSmartSchedule(
         originCode: 'MP',
