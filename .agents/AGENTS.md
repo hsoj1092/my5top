@@ -7,8 +7,8 @@ Whenever proposing a release title/notes, check the current `version:` line in `
 Whenever the user asks for changes to the app *after* a walkthrough has been completed, you must ask them:
 "Do you want to update the `pubspec.yaml` file so the app can detect the new changes in the update (using the same version number or a new one)?"
 Wait for the user's answer:
-- If the user chooses to keep the version number the same, provide new patch/release notes updating the current version's notes and title to include the recent changes, then immediately stage, commit, and push the changes to `origin main`.
-- If the user provides a new version number (or confirms bumping to a new version), update `pubspec.yaml` to that version (proactively bumping the build number and syncing `AppState`), immediately stage, commit, and push the changes to `origin main` (without asking a second time), and provide the new release title and release notes matching the new version number.
+- If the user chooses to keep the version number the same, update `release_notes.md` and provide new patch/release notes updating the current version's notes and title to include the recent changes, then immediately stage, commit, and push the changes to `origin main` (which automatically rebuilds and updates the GitHub Release APK).
+- If the user provides a new version number (or confirms bumping to a new version), update `pubspec.yaml` to that version (proactively bumping the build number and syncing `AppState`), update `release_notes.md` (`# vX.Y.Z — Title` on line 1 + Markdown body), immediately stage, commit, and push the changes to `origin main` (without asking a second time), and provide the new release title and release notes matching the new version number.
 These notes and titles should be formatted in Markdown, ready to copy-paste directly into a GitHub release.
 
 ## Global Dynamic System Navigation Bar & SafeArea Padding Rule
