@@ -32,6 +32,7 @@ jobs:
       - name: Scaffold missing platform files (if needed) & Get dependencies
         run: |
           flutter create --platforms=android --org com.my5top .
+          rm -f test/widget_test.dart
           flutter pub get
 
       - name: Run unit tests
