@@ -6,6 +6,15 @@ import '../widgets/animated_train_timeline.dart';
 import '../widgets/anime_mascot_banner.dart';
 
 class ActiveRideScreen extends StatefulWidget {
+  static const String routeName = '/active-ride';
+
+  static Route<void> route() {
+    return MaterialPageRoute<void>(
+      settings: const RouteSettings(name: routeName),
+      builder: (_) => const ActiveRideScreen(),
+    );
+  }
+
   const ActiveRideScreen({super.key});
 
   @override
@@ -42,7 +51,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                   ),
                   const SizedBox(height: 16),
                   ElevatedButton(
-                    onPressed: () => Navigator.of(context).pop(),
+                    onPressed: () => Navigator.of(context).maybePop(),
                     child: const Text('Back to Departures'),
                   ),
                 ],
@@ -460,6 +469,8 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                     alertStopsAwayThreshold: rules.startNotifyingStopsAway,
                     trainId: trip.trainId,
                     track: trip.track,
+                    sceneSeed: appState.rideSceneSeed,
+                    variationIndex: appState.rideVariationIndex,
                   ),
                   const SizedBox(height: 14),
 
@@ -528,140 +539,146 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                         ),
                         AnimatedCrossFade(
                           firstChild: const SizedBox.shrink(),
-                          secondChild: Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Divider(height: 16),
-                                Text(
-                                  'Start alerting me when X stops away from ${appState.destinationStation.shortName}:',
-                                  style: TextStyle(
-                                    fontSize: 12.5,
-                                    color: pal.textSecondary,
+                          secondChild: Material(
+                            type: MaterialType.transparency,
+                            child: Padding(
+                              padding:
+                                  const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Divider(height: 16),
+                                  Text(
+                                    'Start alerting me when X stops away from ${appState.destinationStation.shortName}:',
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      color: pal.textSecondary,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(height: 10),
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [1, 2, 3, 4, 5, 6].map((count) {
-                                    final selected =
-                                        rules.startNotifyingStopsAway == count;
-                                    return InkWell(
-                                      borderRadius: BorderRadius.circular(14),
-                                      onTap: () {
-                                        appState.updateNotificationRules(
-                                          rules.copyWith(
-                                            startNotifyingStopsAway: count,
+                                  const SizedBox(height: 10),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [1, 2, 3, 4, 5, 6].map((count) {
+                                      final selected =
+                                          rules.startNotifyingStopsAway ==
+                                              count;
+                                      return InkWell(
+                                        borderRadius: BorderRadius.circular(14),
+                                        onTap: () {
+                                          appState.updateNotificationRules(
+                                            rules.copyWith(
+                                              startNotifyingStopsAway: count,
+                                            ),
+                                          );
+                                        },
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 4,
                                           ),
-                                        );
-                                      },
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 6,
-                                          vertical: 4,
-                                        ),
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Container(
-                                              width: 32,
-                                              height: 32,
-                                              decoration: BoxDecoration(
-                                                shape: BoxShape.circle,
-                                                color: selected
-                                                    ? pal.primaryAccent
-                                                    : pal.scaffoldBg,
-                                                border: Border.all(
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Container(
+                                                width: 32,
+                                                height: 32,
+                                                decoration: BoxDecoration(
+                                                  shape: BoxShape.circle,
                                                   color: selected
                                                       ? pal.primaryAccent
-                                                      : pal.cardBorder,
-                                                  width: 1.8,
+                                                      : pal.scaffoldBg,
+                                                  border: Border.all(
+                                                    color: selected
+                                                        ? pal.primaryAccent
+                                                        : pal.cardBorder,
+                                                    width: 1.8,
+                                                  ),
+                                                ),
+                                                alignment: Alignment.center,
+                                                child: Icon(
+                                                  selected
+                                                      ? Icons
+                                                          .notifications_active
+                                                      : Icons.circle,
+                                                  size: selected ? 15 : 8,
+                                                  color: selected
+                                                      ? const Color(0xFF0F172A)
+                                                      : pal.textSecondary,
                                                 ),
                                               ),
-                                              alignment: Alignment.center,
-                                              child: Icon(
-                                                selected
-                                                    ? Icons.notifications_active
-                                                    : Icons.circle,
-                                                size: selected ? 15 : 8,
-                                                color: selected
-                                                    ? const Color(0xFF0F172A)
-                                                    : pal.textSecondary,
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                '$count',
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: selected
+                                                      ? FontWeight.w900
+                                                      : FontWeight.w600,
+                                                  color: selected
+                                                      ? pal.primaryAccent
+                                                      : pal.textSecondary,
+                                                ),
                                               ),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              '$count',
-                                              style: TextStyle(
-                                                fontSize: 12,
-                                                fontWeight: selected
-                                                    ? FontWeight.w900
-                                                    : FontWeight.w600,
-                                                color: selected
-                                                    ? pal.primaryAccent
-                                                    : pal.textSecondary,
-                                              ),
-                                            ),
-                                          ],
+                                            ],
+                                          ),
                                         ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                  const Divider(height: 20),
+                                  SwitchListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    title: Text(
+                                      'Notify on every single stop',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: pal.textPrimary,
                                       ),
-                                    );
-                                  }).toList(),
-                                ),
-                                const Divider(height: 20),
-                                SwitchListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  title: Text(
-                                    'Notify on every single stop',
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
-                                      color: pal.textPrimary,
                                     ),
-                                  ),
-                                  subtitle: Text(
-                                    'Ping me each time a station is cleared along the line',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: pal.textSecondary,
+                                    subtitle: Text(
+                                      'Ping me each time a station is cleared along the line',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: pal.textSecondary,
+                                      ),
                                     ),
+                                    value: rules.notifyEveryStop,
+                                    activeColor: pal.primaryAccent,
+                                    onChanged: (val) {
+                                      appState.updateNotificationRules(
+                                        rules.copyWith(notifyEveryStop: val),
+                                      );
+                                    },
                                   ),
-                                  value: rules.notifyEveryStop,
-                                  activeColor: pal.primaryAccent,
-                                  onChanged: (val) {
-                                    appState.updateNotificationRules(
-                                      rules.copyWith(notifyEveryStop: val),
-                                    );
-                                  },
-                                ),
-                                SwitchListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  title: Text(
-                                    'Final Wake-Up Arrival Alarm',
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
-                                      color: pal.textPrimary,
+                                  SwitchListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    title: Text(
+                                      'Final Wake-Up Arrival Alarm',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: pal.textPrimary,
+                                      ),
                                     ),
-                                  ),
-                                  subtitle: Text(
-                                    'High-priority alarm + vibration when approaching ${appState.destinationStation.shortName}',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: pal.textSecondary,
+                                    subtitle: Text(
+                                      'High-priority alarm + vibration when approaching ${appState.destinationStation.shortName}',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: pal.textSecondary,
+                                      ),
                                     ),
+                                    value: rules.finalWakeUpAlarm,
+                                    activeColor: pal.urgentColor,
+                                    onChanged: (val) {
+                                      appState.updateNotificationRules(
+                                        rules.copyWith(finalWakeUpAlarm: val),
+                                      );
+                                    },
                                   ),
-                                  value: rules.finalWakeUpAlarm,
-                                  activeColor: pal.urgentColor,
-                                  onChanged: (val) {
-                                    appState.updateNotificationRules(
-                                      rules.copyWith(finalWakeUpAlarm: val),
-                                    );
-                                  },
-                                ),
-                              ],
+                                ],
+                              ),
                             ),
                           ),
                           crossFadeState: _notifZippyExpanded
@@ -682,7 +699,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                       onPressed: () async {
                         await appState.completeOrCancelRide(saveToHistory: true);
                         if (context.mounted) {
-                          Navigator.of(context).pop();
+                          Navigator.of(context).maybePop();
                         }
                       },
                       style: ElevatedButton.styleFrom(

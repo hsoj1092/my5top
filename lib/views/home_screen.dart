@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../main.dart';
 import '../models/station.dart';
 import '../models/train_trip.dart';
 import '../providers/app_state.dart';
@@ -19,7 +20,13 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  static const int _initialUpcomingLimit = 3;
+  static const int _loadMoreStep = 4;
+
   InAppAlertEvent? _latestBannerAlert;
+  int _visibleUpcomingCount = _initialUpcomingLimit;
+  String _lastRouteKey = '';
+  DateTime? _lastPausedAt;
 
   @override
   void initState() {
@@ -46,7 +53,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
     final appState = context.read<AppState>();
-    appState.setAppFocused(state == AppLifecycleState.resumed);
+    if (state == AppLifecycleState.paused) {
+      _lastPausedAt = DateTime.now();
+      appState.setAppFocused(false);
+      return;
+    }
+
+    if (state == AppLifecycleState.resumed) {
+      final wasBackgrounded = _lastPausedAt != null &&
+          DateTime.now().difference(_lastPausedAt!) >
+              const Duration(seconds: 2);
+      _lastPausedAt = null;
+      appState.setAppFocused(true);
+      _handleAppReopened(appState, wasBackgrounded: wasBackgrounded);
+    } else {
+      appState.setAppFocused(false);
+    }
+  }
+
+  Future<void> _handleAppReopened(
+    AppState appState, {
+    required bool wasBackgrounded,
+  }) async {
+    final expired = await appState.checkAndExpireStaleActiveRide();
+    if (!mounted) return;
+    if (expired) {
+      // Tracked train arrival time is >= 20 min stale -> return to main train table
+      if (activeRideRouteObserver.isActiveRideInStack) {
+        appNavigatorKey.currentState?.popUntil((r) => r.isFirst);
+      }
+      return;
+    }
+    // If reopened from background while actively tracking a non-stale train, bring back ActiveRideScreen
+    if (wasBackgrounded &&
+        appState.isRiding &&
+        !activeRideRouteObserver.isActiveRideInStack) {
+      appNavigatorKey.currentState?.push(ActiveRideScreen.route());
+    }
   }
 
   void _onInAppAlert(InAppAlertEvent evt) {
@@ -64,6 +107,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final orig = appState.originStation;
         final dest = appState.destinationStation;
         final rules = appState.notificationRules;
+
+        final routeKey = '${orig.code}->${dest.code}';
+        if (_lastRouteKey != routeKey) {
+          _lastRouteKey = routeKey;
+          _visibleUpcomingCount = _initialUpcomingLimit;
+        }
 
         final watchedTrain = appState.upcomingTrains
             .where((t) => t.trainId == appState.watchedTrainId)
@@ -85,6 +134,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             orig.code == appState.homeStationCode;
 
         final upcomingList = appState.upcomingScheduleTrains;
+        final displayedUpcoming =
+            upcomingList.take(_visibleUpcomingCount).toList();
+        final remainingUpcomingCount =
+            (upcomingList.length - displayedUpcoming.length).clamp(0, 999);
         final recentDepartedList = appState.recentDepartedTrains;
         final lastCheckedStr = appState.lastScheduleRefresh != null
             ? NjtApiService.formatTimeHms(appState.lastScheduleRefresh!)
@@ -252,11 +305,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   if (appState.isRiding && appState.activeRideTrain != null) ...[
                     InkWell(
                       onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const ActiveRideScreen(),
-                          ),
-                        );
+                        Navigator.of(context).push(ActiveRideScreen.route());
                       },
                       borderRadius: BorderRadius.circular(20),
                       child: Container(
@@ -607,47 +656,179 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ],
                       ),
                     )
-                  else
-                    ...upcomingList.map(
+                  else ...[
+                    ...displayedUpcoming.map(
                       (trip) => _buildTrainCard(context, appState, trip),
                     ),
-
-                  // 6. Just Departed (2-3 Prior Departures) at the bottom so user can still select & check in!
-                  if (recentDepartedList.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.history_toggle_off_rounded,
-                              size: 18,
-                              color: pal.secondaryAccent,
-                            ),
-                            const SizedBox(width: 7),
-                            Text(
-                              'Just Departed (${orig.code} → ${dest.code})',
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w800,
-                                color: pal.textPrimary,
+                    if (remainingUpcomingCount > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () {
+                              setState(() {
+                                _visibleUpcomingCount += _loadMoreStep;
+                              });
+                            },
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: pal.primaryAccent,
+                              backgroundColor:
+                                  pal.primaryAccent.withOpacity(0.08),
+                              side: BorderSide(
+                                color: pal.primaryAccent.withOpacity(0.45),
+                                width: 1.3,
+                              ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 12,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
                               ),
                             ),
-                          ],
-                        ),
-                        Text(
-                          'Already on board? Tap to track',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            color: pal.textSecondary,
+                            icon: const Icon(
+                              Icons.expand_more_rounded,
+                              size: 20,
+                            ),
+                            label: Text(
+                              remainingUpcomingCount <= _loadMoreStep
+                                  ? 'Load More Trains ($remainingUpcomingCount more)'
+                                  : 'Load More Trains (+$_loadMoreStep of $remainingUpcomingCount more)',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
                           ),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    ...recentDepartedList.map(
-                      (trip) => _buildTrainCard(context, appState, trip),
+                      )
+                    else if (upcomingList.length > _initialUpcomingLimit &&
+                        _visibleUpcomingCount > _initialUpcomingLimit)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Center(
+                          child: TextButton.icon(
+                            onPressed: () {
+                              setState(() {
+                                _visibleUpcomingCount = _initialUpcomingLimit;
+                              });
+                            },
+                            icon: Icon(
+                              Icons.expand_less_rounded,
+                              size: 18,
+                              color: pal.textSecondary,
+                            ),
+                            label: Text(
+                              'Show Fewer Trains',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: pal.textSecondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+
+                  // 6. Just Departed Section — Distinct Tinted Wrapper + Standout Header
+                  if (recentDepartedList.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.fromLTRB(14, 14, 14, 4),
+                      decoration: BoxDecoration(
+                        color: Color.lerp(
+                          pal.cardBg,
+                          pal.secondaryAccent,
+                          pal.isDark ? 0.16 : 0.10,
+                        ),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: pal.secondaryAccent.withOpacity(
+                            pal.isDark ? 0.48 : 0.40,
+                          ),
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(7),
+                                decoration: BoxDecoration(
+                                  color: pal.secondaryAccent.withOpacity(0.20),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(
+                                  Icons.history_toggle_off_rounded,
+                                  size: 19,
+                                  color: pal.secondaryAccent,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Just Departed (${orig.code} → ${dest.code})',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 16.5,
+                                        fontWeight: FontWeight.w900,
+                                        color: pal.secondaryAccent,
+                                        letterSpacing: -0.2,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      'Already on board? Tap "I\'m on this!" to track stops',
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11.8,
+                                        fontWeight: FontWeight.w600,
+                                        color: pal.textSecondary,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: pal.secondaryAccent.withOpacity(0.20),
+                                  borderRadius: BorderRadius.circular(99),
+                                  border: Border.all(
+                                    color: pal.secondaryAccent.withOpacity(0.45),
+                                  ),
+                                ),
+                                child: Text(
+                                  'EN ROUTE',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w900,
+                                    color: pal.secondaryAccent,
+                                    letterSpacing: 0.3,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          ...recentDepartedList.map(
+                            (trip) => _buildTrainCard(context, appState, trip),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ],
@@ -820,239 +1001,303 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ? (pal.isDark ? const Color(0xFFFBBF24) : const Color(0xFFD97706))
         : pal.secondaryAccent;
 
+    final Color statusColor = (trip.status.toLowerCase().contains('delay') ||
+            trip.status.toLowerCase().contains('cancel'))
+        ? pal.urgentColor
+        : trip.isRecentPastDeparture
+            ? pal.secondaryAccent
+            : pal.successColor;
+
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: 11),
       decoration: BoxDecoration(
         color: trip.isRecentPastDeparture
-            ? pal.cardBg.withOpacity(0.88)
+            ? pal.scaffoldBg.withOpacity(pal.isDark ? 0.78 : 0.94)
             : pal.cardBg,
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: isActiveRide
               ? pal.primaryAccent
               : isWatched
                   ? pal.trackBadgeBg
-                  : pal.cardBorder,
+                  : trip.isRecentPastDeparture
+                      ? pal.secondaryAccent.withOpacity(0.32)
+                      : pal.cardBorder,
           width: isActiveRide || isWatched ? 1.8 : 1.2,
         ),
       ),
       child: InkWell(
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(20),
         onTap: () => _showTrainDetailSheet(context, appState, trip),
         child: Padding(
-          padding: const EdgeInsets.all(15),
+          padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Top row: Train # + Express/Local badge + Track Assignment Pill
+              // Top row: Train # + Express/Local badge + Destination + Track/Watch Pill
               Row(
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: pal.primaryAccent.withOpacity(0.18),
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: Text(
-                      '#${trip.trainId}',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w900,
-                        color: pal.primaryAccent,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isExpressCount
-                          ? pal.urgentColor.withOpacity(0.16)
-                          : pal.secondaryAccent.withOpacity(0.16),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      isExpressCount ? '⚡ EXPRESS' : 'LOCAL',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w800,
-                        color: isExpressCount
-                            ? pal.urgentColor
-                            : pal.secondaryAccent,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      '→ ${trip.finalDestinationName}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: pal.textSecondary,
-                      ),
+                    child: Row(
+                      children: [
+                        Flexible(
+                          flex: 0,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7,
+                              vertical: 3.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: pal.primaryAccent.withOpacity(0.18),
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            child: Text(
+                              '#${trip.trainId}',
+                              maxLines: 1,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                                color: pal.primaryAccent,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 5),
+                        Flexible(
+                          fit: FlexFit.loose,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 7,
+                              vertical: 3.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isExpressCount
+                                  ? pal.urgentColor.withOpacity(0.16)
+                                  : pal.secondaryAccent.withOpacity(0.16),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              isExpressCount ? '⚡ EXP' : 'LOCAL',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                color: isExpressCount
+                                    ? pal.urgentColor
+                                    : pal.secondaryAccent,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            '→ ${trip.finalDestinationName}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11.2,
+                              fontWeight: FontWeight.w700,
+                              color: pal.textSecondary,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 6),
                   // Track Assignment Badge or Watch Track Pill
-                  if (trip.hasTrack)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 11,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: pal.trackBadgeBg,
-                        borderRadius: BorderRadius.circular(10),
-                        boxShadow: [
-                          BoxShadow(
-                            color: pal.trackBadgeBg.withOpacity(0.30),
-                            blurRadius: 8,
+                  if (trip.hasTrack) ...[
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 94),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerRight,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 4,
                           ),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.confirmation_number_rounded,
-                            size: 13,
-                            color: pal.trackBadgeText,
+                          decoration: BoxDecoration(
+                            color: pal.trackBadgeBg,
+                            borderRadius: BorderRadius.circular(10),
+                            boxShadow: [
+                              BoxShadow(
+                                color: pal.trackBadgeBg.withOpacity(0.30),
+                                blurRadius: 8,
+                              ),
+                            ],
                           ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'TRACK ${trip.track}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w900,
-                              color: pal.trackBadgeText,
-                            ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.confirmation_number_rounded,
+                                size: 12,
+                                color: pal.trackBadgeText,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                'TRACK ${trip.track}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w900,
+                                  color: pal.trackBadgeText,
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
-                    )
-                  else if (!trip.isRecentPastDeparture)
-                    InkWell(
-                      onTap: () => appState.toggleWatchTrainTrack(trip),
-                      borderRadius: BorderRadius.circular(10),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 5,
                         ),
-                        decoration: BoxDecoration(
-                          color: isWatched
-                              ? pal.trackBadgeBg.withOpacity(0.22)
-                              : pal.scaffoldBg,
+                      ),
+                    ),
+                  ] else if (!trip.isRecentPastDeparture) ...[
+                    const SizedBox(width: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 108),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerRight,
+                        child: InkWell(
+                          onTap: () => appState.toggleWatchTrainTrack(trip),
                           borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: isWatched
-                                ? pal.trackBadgeBg
-                                : pal.textSecondary.withOpacity(0.4),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              isWatched
-                                  ? Icons.visibility_rounded
-                                  : Icons.notifications_none_rounded,
-                              size: 13,
-                              color: isWatched
-                                  ? pal.trackBadgeBg
-                                  : pal.textSecondary,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
                             ),
-                            const SizedBox(width: 4),
-                            Text(
-                              isWatched ? 'WATCHING TRK ★' : 'TRACK TBA • WATCH',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
+                            decoration: BoxDecoration(
+                              color: isWatched
+                                  ? pal.trackBadgeBg.withOpacity(0.22)
+                                  : pal.scaffoldBg,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
                                 color: isWatched
                                     ? pal.trackBadgeBg
-                                    : pal.textSecondary,
+                                    : pal.textSecondary.withOpacity(0.4),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  isWatched
+                                      ? Icons.visibility_rounded
+                                      : Icons.notifications_none_rounded,
+                                  size: 12,
+                                  color: isWatched
+                                      ? pal.trackBadgeBg
+                                      : pal.textSecondary,
+                                ),
+                                const SizedBox(width: 3.5),
+                                Text(
+                                  isWatched ? 'WATCHING ★' : 'TBA • WATCH',
+                                  style: TextStyle(
+                                    fontSize: 10.2,
+                                    fontWeight: FontWeight.w800,
+                                    color: isWatched
+                                        ? pal.trackBadgeBg
+                                        : pal.textSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 11),
+
+              // Middle row: DepartureTime -> ArrivalTime (left) & Duration + Status (right, constrained inside card!)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    flex: 6,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Text(
+                              trip.departureTime,
+                              style: TextStyle(
+                                fontSize: 21,
+                                fontWeight: FontWeight.w900,
+                                color: pal.textPrimary,
+                              ),
+                            ),
+                            Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 6),
+                              child: Icon(
+                                Icons.arrow_forward_rounded,
+                                size: 17,
+                                color: pal.primaryAccent,
+                              ),
+                            ),
+                            Text(
+                              trip.arrivalTime,
+                              style: TextStyle(
+                                fontSize: 19,
+                                fontWeight: FontWeight.w800,
+                                color: pal.textSecondary,
                               ),
                             ),
                           ],
                         ),
                       ),
                     ),
-                ],
-              ),
-              const SizedBox(height: 12),
-
-              // Middle row: DepartureTime -> ArrivalTime & Duration + Status
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    trip.departureTime,
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w900,
-                      color: pal.textPrimary,
-                    ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Icon(
-                      Icons.arrow_forward_rounded,
-                      size: 18,
-                      color: pal.primaryAccent,
-                    ),
-                  ),
-                  Text(
-                    trip.arrivalTime,
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      color: pal.textSecondary,
-                    ),
-                  ),
-                  const Spacer(),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        '${trip.durationMinutes} min',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          color: pal.textPrimary,
-                        ),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    flex: 5,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${trip.durationMinutes} min',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w800,
+                              color: pal.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            trip.status,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              fontSize: 11.2,
+                              height: 1.2,
+                              fontWeight: FontWeight.w700,
+                              color: statusColor,
+                            ),
+                          ),
+                        ],
                       ),
-                      Text(
-                        trip.status,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          color: (trip.status.toLowerCase().contains('delay') ||
-                                  trip.status.toLowerCase().contains('cancel'))
-                              ? pal.urgentColor
-                              : trip.isRecentPastDeparture
-                                  ? pal.secondaryAccent
-                                  : pal.successColor,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 11),
 
-              // Bottom row: Stop count till destination (color-coded + ⚡ emoji for <= 4 stops) + Boarding button
+              // Bottom row: Stop count till destination + Boarding button
               Row(
                 children: [
                   Flexible(
@@ -1119,7 +1364,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       foregroundColor: const Color(0xFF0F172A),
                       elevation: 0,
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 13,
+                        horizontal: 12,
                         vertical: 9,
                       ),
                       minimumSize: const Size(0, 36),
@@ -1132,11 +1377,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         await appState.startRide(trip);
                       }
                       if (context.mounted) {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const ActiveRideScreen(),
-                          ),
-                        );
+                        Navigator.of(context).push(ActiveRideScreen.route());
                       }
                     },
                     icon: Icon(
@@ -1147,6 +1388,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     ),
                     label: Text(
                       isActiveRide ? 'Active Ride' : 'I\'m on this!',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w900,
@@ -1372,11 +1615,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             Navigator.of(ctx).pop();
                             await appState.startRide(trip);
                             if (context.mounted) {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => const ActiveRideScreen(),
-                                ),
-                              );
+                              Navigator.of(context)
+                                  .push(ActiveRideScreen.route());
                             }
                           },
                           icon: const Icon(Icons.train_rounded),

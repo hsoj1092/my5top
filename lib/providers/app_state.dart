@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,9 +21,43 @@ import '../services/notification_service.dart';
 import '../theme/anime_theme.dart';
 
 class AppState extends ChangeNotifier {
-  static String appVersion = '1.0.2';
-  static int appBuildNumber = 3;
+  static String appVersion = '1.0.3';
+  static int appBuildNumber = 4;
   static bool _hasCheckedUpdateThisSession = false;
+  static const Duration activeRideStalenessThreshold = Duration(minutes: 20);
+
+  /// Computes the scheduled/estimated Eastern arrival [DateTime] for [trip].
+  static DateTime computeTripArrivalEastern(
+    TrainTrip trip, {
+    DateTime? referenceEasternNow,
+  }) {
+    final refEast = referenceEasternNow ?? NjtApiService.easternNow();
+    final depEast = trip.departureDateTime ??
+        NjtApiService.parseNjtTime(trip.departureTime, refEast) ??
+        refEast;
+
+    final stops = trip.commuteStops;
+    final arrRaw = trip.arrivalTime.trim().isNotEmpty
+        ? trip.arrivalTime
+        : (stops.isNotEmpty ? stops.last.estimatedTime : '');
+    DateTime? arrEast = NjtApiService.parseNjtTime(arrRaw, depEast);
+    if (arrEast != null) {
+      if (arrEast.isBefore(depEast)) {
+        arrEast = arrEast.add(const Duration(days: 1));
+      }
+      return arrEast;
+    }
+    return depEast.add(Duration(minutes: trip.durationMinutes));
+  }
+
+  /// Returns `true` when [nowEastern] is 20 minutes or more past [arrivalEastern].
+  static bool isTripArrivalStale({
+    required DateTime arrivalEastern,
+    required DateTime nowEastern,
+    Duration maxStaleness = activeRideStalenessThreshold,
+  }) {
+    return nowEastern.difference(arrivalEastern) >= maxStaleness;
+  }
 
   static const MethodChannel _safBackupChannel =
       MethodChannel('com.my5top.commute/saf_backup');
@@ -66,6 +101,10 @@ class AppState extends ChangeNotifier {
 
   // Active Ride & Hybrid GPS + API State
   TrainTrip? _activeRideTrain;
+  DateTime? _activeRideArrivalEastern;
+  DateTime? _activeRideBoardedAt;
+  int _rideSceneSeed = 0;
+  int _rideVariationIndex = 0;
   int _currentStopIndex = 0; // Index within activeRideTrain.commuteStops
   Position? _currentGpsPosition;
   double? _distanceToNextStopMeters;
@@ -87,6 +126,25 @@ class AppState extends ChangeNotifier {
 
   AppState() {
     _init();
+  }
+
+  AppState._uninitialized();
+
+  @visibleForTesting
+  static Future<AppState> createForTesting({
+    required Box settingsBox,
+    List<TrainTrip>? initialTrains,
+  }) async {
+    final state = AppState._uninitialized();
+    _hasCheckedUpdateThisSession = true;
+    state._settingsBox = settingsBox;
+    await state._loadFromBox();
+    if (initialTrains != null) {
+      state._upcomingTrains = initialTrains;
+      state._lastScheduleRefresh = DateTime.now();
+    }
+    state._initialized = true;
+    return state;
   }
 
   // Getters
@@ -137,6 +195,9 @@ class AppState extends ChangeNotifier {
       _isAppFocused || _watchedTrainId != null || _activeRideTrain != null;
 
   TrainTrip? get activeRideTrain => _activeRideTrain;
+  DateTime? get activeRideArrivalEastern => _activeRideArrivalEastern;
+  int get rideSceneSeed => _rideSceneSeed;
+  int get rideVariationIndex => _rideVariationIndex;
   bool get isRiding => _activeRideTrain != null;
   int get currentStopIndex => _currentStopIndex;
   Position? get currentGpsPosition => _currentGpsPosition;
@@ -178,17 +239,23 @@ class AppState extends ChangeNotifier {
   Future<void> _init() async {
     await Hive.initFlutter();
     _settingsBox = await Hive.openBox('my5top_settings');
-    _loadFromBox();
+    await _loadFromBox();
     _initialized = true;
     notifyListeners();
 
     await NotificationService.requestPermission();
+    if (_activeRideTrain != null) {
+      await _startGpsStream();
+      await _updateOngoingNotification();
+    } else {
+      await NotificationService.cancelRideProgress();
+    }
     await refreshSchedules();
     _startPeriodicSchedulePoll();
     _initLastKnownGps();
   }
 
-  void _loadFromBox() {
+  Future<void> _loadFromBox() async {
     _animeThemeStyle =
         _settingsBox.get('anime_theme_style', defaultValue: 'mygo') as String;
     _isDarkMode = _settingsBox.get('is_dark_mode', defaultValue: true) as bool;
@@ -254,6 +321,105 @@ class AppState extends ChangeNotifier {
           .whereType<Map>()
           .map((m) => RideLog.fromJson(Map<String, dynamic>.from(m)))
           .toList();
+    }
+
+    final rawRide = _settingsBox.get('active_ride_state');
+    if (rawRide is Map) {
+      try {
+        final rideMap = Map<String, dynamic>.from(rawRide);
+        final rawTrip = rideMap['trip'];
+        if (rawTrip is Map) {
+          final trip = TrainTrip.fromJson(Map<String, dynamic>.from(rawTrip));
+          final nowEast = NjtApiService.easternNow();
+          final arrEast = DateTime.tryParse(
+                rideMap['arrivalEasternIso']?.toString() ?? '',
+              ) ??
+              computeTripArrivalEastern(trip, referenceEasternNow: nowEast);
+          final boardedAt = DateTime.tryParse(
+                rideMap['boardedAtIso']?.toString() ?? '',
+              ) ??
+              DateTime.now().subtract(const Duration(minutes: 30));
+
+          if (isTripArrivalStale(
+            arrivalEastern: arrEast,
+            nowEastern: nowEast,
+          )) {
+            // Tracked train arrival time is >= 20 min stale: archive log & open to main train table
+            final origSt = getStationByCode(trip.originCode);
+            final destSt = getStationByCode(trip.destinationCode);
+            final log = RideLog(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              trainId: trip.trainId,
+              originCode: trip.originCode,
+              originName: origSt.shortName,
+              destinationCode: trip.destinationCode,
+              destinationName: destSt.shortName,
+              track: trip.track,
+              boardedAt: boardedAt,
+              arrivedAt: DateTime.now(),
+              totalStops: trip.totalStopCount,
+              statusSummary: 'Arrived (${trip.arrivalTime})',
+            );
+            _rideLogs.insert(0, log);
+            if (_rideLogs.length > 50) {
+              _rideLogs = _rideLogs.sublist(0, 50);
+            }
+            await _settingsBox.put(
+              'ride_logs',
+              _rideLogs.map((e) => e.toJson()).toList(),
+            );
+            await _settingsBox.delete('active_ride_state');
+            _activeRideTrain = null;
+          } else {
+            // Active ride is still fresh (< 20 min past arrival): restore full tracking state!
+            _activeRideTrain = trip;
+            _activeRideArrivalEastern = arrEast;
+            _activeRideBoardedAt = boardedAt;
+            _originStationCode = trip.originCode;
+            _destinationStationCode = trip.destinationCode;
+
+            final stops = trip.commuteStops;
+            final savedIdx =
+                (rideMap['currentStopIndex'] as num?)?.toInt() ?? 0;
+            _currentStopIndex = stops.isEmpty
+                ? 0
+                : savedIdx.clamp(0, stops.length - 1);
+            _segmentProgress =
+                ((rideMap['segmentProgress'] as num?)?.toDouble() ?? 0.0)
+                    .clamp(0.0, 1.0);
+
+            _notifiedStopIndices.clear();
+            final rawNotified = rideMap['notifiedStopIndices'];
+            if (rawNotified is List) {
+              for (final item in rawNotified) {
+                if (item is num) _notifiedStopIndices.add(item.toInt());
+              }
+            }
+            _hasFiredWakeUpAlarm = rideMap['hasFiredWakeUpAlarm'] == true;
+            _lastTrackingSignalSource =
+                (rideMap['lastTrackingSignalSource'] ?? 'Restored Active Ride')
+                    .toString();
+            _rideSceneSeed = (rideMap['rideSceneSeed'] as num?)?.toInt() ??
+                math.Random().nextInt(1 << 20);
+            _rideVariationIndex =
+                ((rideMap['rideVariationIndex'] as num?)?.toInt() ?? 0) % 5;
+            _lastRideUpdateDateTime = DateTime.now();
+
+            if (stops.length > 1) {
+              final curr = stops[_currentStopIndex];
+              final next =
+                  stops[(_currentStopIndex + 1).clamp(0, stops.length - 1)];
+              final dest = stops.last;
+              _distanceToNextStopMeters = getStationByCode(curr.stationCode)
+                  .distanceMetersTo(next.latitude, next.longitude);
+              _distanceToDestinationMeters = getStationByCode(curr.stationCode)
+                  .distanceMetersTo(dest.latitude, dest.longitude);
+            }
+          }
+        }
+      } catch (_) {
+        await _settingsBox.delete('active_ride_state');
+      }
     }
   }
 
@@ -668,9 +834,51 @@ class AppState extends ChangeNotifier {
   }
 
   // --- Active Ride & Hybrid GPS + API Engine ---
+  Future<void> _saveActiveRideToBox() async {
+    final trip = _activeRideTrain;
+    if (trip == null) {
+      await _settingsBox.delete('active_ride_state');
+      return;
+    }
+    await _settingsBox.put('active_ride_state', {
+      'trip': trip.toJson(),
+      'arrivalEasternIso': _activeRideArrivalEastern?.toIso8601String(),
+      'boardedAtIso': _activeRideBoardedAt?.toIso8601String(),
+      'currentStopIndex': _currentStopIndex,
+      'segmentProgress': _segmentProgress,
+      'notifiedStopIndices': _notifiedStopIndices.toList(),
+      'hasFiredWakeUpAlarm': _hasFiredWakeUpAlarm,
+      'lastTrackingSignalSource': _lastTrackingSignalSource,
+      'rideSceneSeed': _rideSceneSeed,
+      'rideVariationIndex': _rideVariationIndex,
+    });
+  }
+
+  /// Checks if the currently tracked train's arrival time is 20 minutes or more
+  /// stale in Eastern time; if so, completes/clears the ride and returns `true`.
+  Future<bool> checkAndExpireStaleActiveRide({DateTime? nowEastern}) async {
+    final trip = _activeRideTrain;
+    if (trip == null) return false;
+
+    final nowEast = nowEastern ?? NjtApiService.easternNow();
+    final arrEast = _activeRideArrivalEastern ??
+        computeTripArrivalEastern(trip, referenceEasternNow: nowEast);
+
+    if (isTripArrivalStale(arrivalEastern: arrEast, nowEastern: nowEast)) {
+      await completeOrCancelRide(saveToHistory: true);
+      return true;
+    }
+    return false;
+  }
+
   Future<void> startRide(TrainTrip trip) async {
     stopAutoSimulate();
+    final rng = math.Random();
     _activeRideTrain = trip;
+    _activeRideBoardedAt = DateTime.now();
+    _activeRideArrivalEastern = computeTripArrivalEastern(trip);
+    _rideSceneSeed = rng.nextInt(1 << 20);
+    _rideVariationIndex = rng.nextInt(5);
     _watchedTrainId = null;
 
     final stops = activeCommuteStops;
@@ -703,6 +911,7 @@ class AppState extends ChangeNotifier {
           .distanceMetersTo(dest.latitude, dest.longitude);
     }
 
+    await _saveActiveRideToBox();
     notifyListeners();
     await _startGpsStream();
     await _updateOngoingNotification();
@@ -793,6 +1002,7 @@ class AppState extends ChangeNotifier {
       );
     }
 
+    _saveActiveRideToBox();
     notifyListeners();
   }
 
@@ -812,8 +1022,15 @@ class AppState extends ChangeNotifier {
           ? freshTrip.stops
           : _activeRideTrain!.stops,
     );
+    _activeRideArrivalEastern = computeTripArrivalEastern(
+      _activeRideTrain!,
+      referenceEasternNow:
+          _activeRideArrivalEastern ?? NjtApiService.easternNow(),
+    );
     if (highestDepartedIdx > _currentStopIndex) {
       _advanceToStopIndex(highestDepartedIdx, source: 'NJT Live API Feed');
+    } else {
+      _saveActiveRideToBox();
     }
   }
 
@@ -845,6 +1062,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     await _updateOngoingNotification();
     await _evaluateStopNotifications(clamped, source: source);
+    await _saveActiveRideToBox();
   }
 
   Future<void> _evaluateStopNotifications(int stopIdx, {required String source}) async {
@@ -996,15 +1214,18 @@ class AppState extends ChangeNotifier {
 
     final trip = _activeRideTrain;
     if (trip != null && saveToHistory) {
+      final origSt = getStationByCode(trip.originCode);
+      final destSt = getStationByCode(trip.destinationCode);
       final log = RideLog(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         trainId: trip.trainId,
         originCode: trip.originCode,
-        originName: originStation.shortName,
+        originName: origSt.shortName,
         destinationCode: trip.destinationCode,
-        destinationName: destinationStation.shortName,
+        destinationName: destSt.shortName,
         track: trip.track,
-        boardedAt: DateTime.now().subtract(const Duration(minutes: 25)),
+        boardedAt: _activeRideBoardedAt ??
+            DateTime.now().subtract(const Duration(minutes: 25)),
         arrivedAt: DateTime.now(),
         totalStops: trip.totalStopCount,
         statusSummary: trip.status,
@@ -1020,8 +1241,11 @@ class AppState extends ChangeNotifier {
     }
 
     _activeRideTrain = null;
+    _activeRideArrivalEastern = null;
+    _activeRideBoardedAt = null;
     _currentStopIndex = 0;
     _segmentProgress = 0.0;
+    await _settingsBox.delete('active_ride_state');
     notifyListeners();
   }
 

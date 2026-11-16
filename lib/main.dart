@@ -5,7 +5,45 @@ import 'package:provider/provider.dart';
 
 import 'providers/app_state.dart';
 import 'providers/backup_provider.dart';
+import 'views/active_ride_screen.dart';
 import 'views/home_screen.dart';
+
+final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
+final ActiveRideRouteObserver activeRideRouteObserver =
+    ActiveRideRouteObserver();
+
+class ActiveRideRouteObserver extends NavigatorObserver {
+  int _activeRideCount = 0;
+  bool get isActiveRideInStack => _activeRideCount > 0;
+
+  bool _isActiveRide(Route<dynamic>? route) =>
+      route?.settings.name == ActiveRideScreen.routeName;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPush(route, previousRoute);
+    if (_isActiveRide(route)) _activeRideCount++;
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didPop(route, previousRoute);
+    if (_isActiveRide(route) && _activeRideCount > 0) _activeRideCount--;
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    super.didRemove(route, previousRoute);
+    if (_isActiveRide(route) && _activeRideCount > 0) _activeRideCount--;
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+    if (_isActiveRide(oldRoute) && _activeRideCount > 0) _activeRideCount--;
+    if (_isActiveRide(newRoute)) _activeRideCount++;
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,13 +58,18 @@ void main() async {
 }
 
 class My5TopApp extends StatelessWidget {
-  const My5TopApp({super.key});
+  final AppState? injectedAppState;
+
+  const My5TopApp({super.key, this.injectedAppState});
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider<AppState>(create: (_) => AppState()),
+        if (injectedAppState != null)
+          ChangeNotifierProvider<AppState>.value(value: injectedAppState!)
+        else
+          ChangeNotifierProvider<AppState>(create: (_) => AppState()),
         ChangeNotifierProvider<BackupProvider>(create: (_) => BackupProvider()),
       ],
       child: Consumer<AppState>(
@@ -49,6 +92,8 @@ class My5TopApp extends StatelessWidget {
           final pal = appState.palette;
 
           return MaterialApp(
+            navigatorKey: appNavigatorKey,
+            navigatorObservers: [activeRideRouteObserver],
             scrollBehavior: MyCustomScrollBehavior(),
             title: 'my5top',
             debugShowCheckedModeBanner: false,
@@ -57,7 +102,7 @@ class My5TopApp extends StatelessWidget {
               final mediaQuery = MediaQuery.of(context);
               return MediaQuery(
                 data: mediaQuery.copyWith(
-                  textScaleFactor: appState.textScaleFactor,
+                  textScaler: TextScaler.linear(appState.textScaleFactor),
                 ),
                 child: ColoredBox(
                   color: pal.scaffoldBg,
@@ -71,7 +116,27 @@ class My5TopApp extends StatelessWidget {
                 ),
               );
             },
-            home: const HomeScreen(),
+            initialRoute:
+                appState.isRiding ? ActiveRideScreen.routeName : '/',
+            onGenerateInitialRoutes: (initialRoute) {
+              return <Route<dynamic>>[
+                MaterialPageRoute(
+                  settings: const RouteSettings(name: '/'),
+                  builder: (_) => const HomeScreen(),
+                ),
+                if (initialRoute == ActiveRideScreen.routeName)
+                  ActiveRideScreen.route(),
+              ];
+            },
+            onGenerateRoute: (settings) {
+              if (settings.name == ActiveRideScreen.routeName) {
+                return ActiveRideScreen.route();
+              }
+              return MaterialPageRoute(
+                settings: const RouteSettings(name: '/'),
+                builder: (_) => const HomeScreen(),
+              );
+            },
           );
         },
       ),
