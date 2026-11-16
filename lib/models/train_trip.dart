@@ -135,7 +135,10 @@ class TrainTrip {
   bool hasDepartedOrigin(DateTime now) {
     if (isRecentPastDeparture) return true;
     if (commuteStops.isNotEmpty && commuteStops.first.departed) return true;
-    if (departureDateTime != null) {
+    final srcLower = dataSource.toLowerCase();
+    final isLiveFeed =
+        srcLower.contains('live') || srcLower.contains('raildata');
+    if (!isLiveFeed && departureDateTime != null) {
       return now.isAfter(departureDateTime!.add(const Duration(minutes: 1)));
     }
     return false;

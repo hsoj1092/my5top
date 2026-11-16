@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 class Station {
   final String code;
+  final String dvCode;
   final String name;
   final String shortName;
   final String line;
@@ -11,13 +12,14 @@ class Station {
 
   const Station({
     required this.code,
+    String? dvCode,
     required this.name,
     required this.shortName,
     required this.line,
     required this.latitude,
     required this.longitude,
     required this.necOrder,
-  });
+  }) : dvCode = dvCode ?? code;
 
   double distanceMetersTo(double lat, double lng) {
     const double earthRadius = 6371000; // meters
@@ -36,6 +38,7 @@ class Station {
 
   Map<String, dynamic> toJson() => {
         'code': code,
+        'dvCode': dvCode,
         'name': name,
         'shortName': shortName,
         'line': line,
@@ -46,10 +49,11 @@ class Station {
 }
 
 /// Complete bundled NJ Transit Northeast Corridor & key commuter stations
-/// with accurate platform GPS coordinates for offline/hybrid geofencing.
+/// with accurate platform GPS coordinates and official NJT 2-char station codes.
 const List<Station> kNjtStations = [
   Station(
     code: 'NY',
+    dvCode: 'NY',
     name: 'New York Penn Station',
     shortName: 'NY Penn',
     line: 'Northeast Corridor',
@@ -59,6 +63,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'SE',
+    dvCode: 'SE',
     name: 'Secaucus Junction',
     shortName: 'Secaucus',
     line: 'Northeast Corridor',
@@ -68,6 +73,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'NP',
+    dvCode: 'NP',
     name: 'Newark Penn Station',
     shortName: 'Newark Penn',
     line: 'Northeast Corridor',
@@ -77,6 +83,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'NA',
+    dvCode: 'NA',
     name: 'Newark Liberty Airport',
     shortName: 'Newark Airport',
     line: 'Northeast Corridor',
@@ -86,6 +93,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'NE',
+    dvCode: 'NZ',
     name: 'North Elizabeth',
     shortName: 'N. Elizabeth',
     line: 'Northeast Corridor',
@@ -95,6 +103,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'EZ',
+    dvCode: 'EZ',
     name: 'Elizabeth',
     shortName: 'Elizabeth',
     line: 'Northeast Corridor',
@@ -104,6 +113,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'LI',
+    dvCode: 'LI',
     name: 'Linden',
     shortName: 'Linden',
     line: 'Northeast Corridor',
@@ -113,6 +123,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'RA',
+    dvCode: 'RH',
     name: 'Rahway',
     shortName: 'Rahway',
     line: 'Northeast Corridor',
@@ -122,6 +133,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'MP',
+    dvCode: 'MP',
     name: 'Metropark',
     shortName: 'Metropark',
     line: 'Northeast Corridor',
@@ -131,6 +143,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'MC',
+    dvCode: 'MU',
     name: 'Metuchen',
     shortName: 'Metuchen',
     line: 'Northeast Corridor',
@@ -140,6 +153,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'ED',
+    dvCode: 'ED',
     name: 'Edison',
     shortName: 'Edison',
     line: 'Northeast Corridor',
@@ -149,6 +163,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'NB',
+    dvCode: 'NB',
     name: 'New Brunswick',
     shortName: 'New Brunswick',
     line: 'Northeast Corridor',
@@ -158,6 +173,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'JA',
+    dvCode: 'JA',
     name: 'Jersey Ave',
     shortName: 'Jersey Ave',
     line: 'Northeast Corridor',
@@ -167,6 +183,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'PJ',
+    dvCode: 'PJ',
     name: 'Princeton Junction',
     shortName: 'Princeton Jct',
     line: 'Northeast Corridor',
@@ -176,6 +193,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'HL',
+    dvCode: 'HL',
     name: 'Hamilton',
     shortName: 'Hamilton',
     line: 'Northeast Corridor',
@@ -185,6 +203,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'TR',
+    dvCode: 'TR',
     name: 'Trenton Transit Center',
     shortName: 'Trenton',
     line: 'Northeast Corridor',
@@ -194,6 +213,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'HB',
+    dvCode: 'HB',
     name: 'Hoboken Terminal',
     shortName: 'Hoboken',
     line: 'Main / Bergen / M&E',
@@ -203,6 +223,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'NW',
+    dvCode: 'ND',
     name: 'Newark Broad Street',
     shortName: 'Newark Broad',
     line: 'Morris & Essex',
@@ -212,6 +233,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'WO',
+    dvCode: 'WB',
     name: 'Woodbridge',
     shortName: 'Woodbridge',
     line: 'North Jersey Coast',
@@ -221,6 +243,7 @@ const List<Station> kNjtStations = [
   ),
   Station(
     code: 'SA',
+    dvCode: 'CH',
     name: 'South Amboy',
     shortName: 'South Amboy',
     line: 'North Jersey Coast',
@@ -235,18 +258,102 @@ Station getStationByCode(String code) {
   for (final s in kNjtStations) {
     if (s.code.toUpperCase() == upper) return s;
   }
+  for (final s in kNjtStations) {
+    if (s.dvCode.toUpperCase() == upper) return s;
+  }
   return kNjtStations.first;
 }
 
+const Map<String, String> _kStationNameAliases = {
+  'new york penn station': 'NY',
+  'new york penn': 'NY',
+  'new york': 'NY',
+  'ny penn station': 'NY',
+  'ny penn': 'NY',
+  'nyp': 'NY',
+  'secaucus upper lvl': 'SE',
+  'secaucus upper level': 'SE',
+  'secaucus lower lvl': 'SE',
+  'secaucus lower level': 'SE',
+  'secaucus junction': 'SE',
+  'secaucus jct': 'SE',
+  'secaucus': 'SE',
+  'newark penn station': 'NP',
+  'newark penn': 'NP',
+  'newark airport': 'NA',
+  'newark liberty airport': 'NA',
+  'newark intl airport': 'NA',
+  'newark international airport': 'NA',
+  'north elizabeth': 'NE',
+  'n elizabeth': 'NE',
+  'elizabeth': 'EZ',
+  'linden': 'LI',
+  'rahway': 'RA',
+  'metropark': 'MP',
+  'metuchen': 'MC',
+  'edison': 'ED',
+  'new brunswick': 'NB',
+  'jersey avenue': 'JA',
+  'jersey ave': 'JA',
+  'princeton junction': 'PJ',
+  'princeton jct': 'PJ',
+  'hamilton': 'HL',
+  'trenton transit center': 'TR',
+  'trenton': 'TR',
+  'hoboken terminal': 'HB',
+  'hoboken': 'HB',
+  'newark broad street': 'NW',
+  'newark broad st': 'NW',
+  'newark broad': 'NW',
+  'woodbridge': 'WO',
+  'south amboy': 'SA',
+};
+
+String _normalizeStationLookupKey(String raw) {
+  return raw
+      .replaceAll(RegExp(r'&#\d+;?'), ' ')
+      .replaceAll('&amp;', '&')
+      .replaceAll(RegExp(r'\s+-SEC\b', caseSensitive: false), '')
+      .replaceAll(RegExp(r'-BH\b', caseSensitive: false), '')
+      .replaceAll('.', '')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim()
+      .toLowerCase();
+}
+
 Station? findStationByNameOrCode(String raw) {
-  final clean = raw.trim().toLowerCase();
+  final clean = _normalizeStationLookupKey(raw);
   if (clean.isEmpty) return null;
+
+  // 1. Exact app code or NJT DepartureVision 2-char code match
   for (final s in kNjtStations) {
-    if (s.code.toLowerCase() == clean ||
-        s.name.toLowerCase() == clean ||
-        s.shortName.toLowerCase() == clean ||
-        clean.contains(s.shortName.toLowerCase()) ||
-        s.name.toLowerCase().contains(clean)) {
+    if (s.code.toLowerCase() == clean || s.dvCode.toLowerCase() == clean) {
+      return s;
+    }
+  }
+
+  // 2. Explicit NJ Transit DepartureVision / RailData alias table
+  final mappedCode = _kStationNameAliases[clean];
+  if (mappedCode != null) {
+    return getStationByCode(mappedCode);
+  }
+
+  // 3. Exact station name or shortName match
+  for (final s in kNjtStations) {
+    if (_normalizeStationLookupKey(s.name) == clean ||
+        _normalizeStationLookupKey(s.shortName) == clean) {
+      return s;
+    }
+  }
+
+  // 4. Controlled fallback: check longest station names first so
+  // "north elizabeth" never steals "elizabeth" and "newark penn" never steals "penn".
+  final sortedByNameLen = List<Station>.from(kNjtStations)
+    ..sort((a, b) => b.name.length.compareTo(a.name.length));
+  for (final s in sortedByNameLen) {
+    final normName = _normalizeStationLookupKey(s.name);
+    final normShort = _normalizeStationLookupKey(s.shortName);
+    if (clean.contains(normName) || clean.contains(normShort)) {
       return s;
     }
   }

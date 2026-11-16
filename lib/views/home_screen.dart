@@ -140,9 +140,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
             actions: [
               IconButton(
-                tooltip: 'Refresh Departures',
-                onPressed: () => appState.refreshSchedules(),
-                icon: const Icon(Icons.refresh_rounded),
+                tooltip: 'Refresh Live NEC Departures',
+                onPressed: () =>
+                    appState.refreshSchedules(forceNetwork: true),
+                icon: appState.isLoadingTrains
+                    ? SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.2,
+                          color: pal.primaryAccent,
+                        ),
+                      )
+                    : const Icon(Icons.refresh_rounded),
               ),
               IconButton(
                 tooltip: 'Settings, Backups & Updates',
@@ -160,8 +170,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           body: SafeArea(
             child: RefreshIndicator(
               color: pal.primaryAccent,
-              onRefresh: () => appState.refreshSchedules(),
+              onRefresh: () =>
+                  appState.refreshSchedules(forceNetwork: true),
               child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: EdgeInsets.fromLTRB(
                   16,
                   8,
@@ -482,26 +494,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.departure_board_rounded,
-                            size: 19,
-                            color: pal.primaryAccent,
-                          ),
-                          const SizedBox(width: 7),
-                          Text(
-                            'Upcoming Trains (${orig.code} → ${dest.code})',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                              color: pal.textPrimary,
+                      Flexible(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.departure_board_rounded,
+                              size: 19,
+                              color: pal.primaryAccent,
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 7),
+                            Flexible(
+                              child: Text(
+                                'Upcoming (${orig.code} → ${dest.code})',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                  color: pal.textPrimary,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
+                      const SizedBox(width: 8),
                       InkWell(
-                        onTap: () => appState.refreshSchedules(),
+                        onTap: () =>
+                            appState.refreshSchedules(forceNetwork: true),
                         borderRadius: BorderRadius.circular(99),
                         child: Container(
                           padding: const EdgeInsets.symmetric(
@@ -519,17 +539,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               Icon(
                                 Icons.sync_rounded,
                                 size: 12,
-                                color: appState.isPollingActive
-                                    ? pal.successColor
-                                    : pal.textSecondary,
+                                color: appState.isLoadingTrains
+                                    ? pal.primaryAccent
+                                    : appState.isPollingActive
+                                        ? pal.successColor
+                                        : pal.textSecondary,
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                '$lastCheckedStr • ${appState.isPollingActive ? "${appState.pollCountdownSeconds}s" : "Idle"}',
+                                appState.isLoadingTrains
+                                    ? 'Polling NEC Live...'
+                                    : '$lastCheckedStr • ${appState.isPollingActive ? "${appState.pollCountdownSeconds}s" : "Idle"}',
                                 style: TextStyle(
                                   fontSize: 10.5,
                                   fontWeight: FontWeight.w700,
-                                  color: pal.textSecondary,
+                                  color: appState.isLoadingTrains
+                                      ? pal.primaryAccent
+                                      : pal.textSecondary,
                                 ),
                               ),
                             ],
@@ -544,6 +570,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     const Padding(
                       padding: EdgeInsets.all(32),
                       child: Center(child: CircularProgressIndicator()),
+                    )
+                  else if (upcomingList.isEmpty)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: pal.cardBg,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: pal.cardBorder),
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.nights_stay_rounded,
+                            size: 28,
+                            color: pal.secondaryAccent,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'No upcoming direct trains posted right now (${orig.shortName} → ${dest.shortName})',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w800,
+                              color: pal.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          TextButton.icon(
+                            onPressed: () =>
+                                appState.refreshSchedules(forceNetwork: true),
+                            icon: const Icon(Icons.refresh_rounded, size: 16),
+                            label: const Text('Poll Live NEC Board'),
+                          ),
+                        ],
+                      ),
                     )
                   else
                     ...upcomingList.map(
@@ -826,7 +888,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
-                  const Spacer(),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '→ ${trip.finalDestinationName}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: pal.textSecondary,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
                   // Track Assignment Badge or Watch Track Pill
                   if (trip.hasTrack)
                     Container(
@@ -963,7 +1038,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         style: TextStyle(
                           fontSize: 11.5,
                           fontWeight: FontWeight.w700,
-                          color: trip.status.toLowerCase().contains('delay')
+                          color: (trip.status.toLowerCase().contains('delay') ||
+                                  trip.status.toLowerCase().contains('cancel'))
                               ? pal.urgentColor
                               : trip.isRecentPastDeparture
                                   ? pal.secondaryAccent

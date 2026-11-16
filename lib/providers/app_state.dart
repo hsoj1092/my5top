@@ -20,8 +20,8 @@ import '../services/notification_service.dart';
 import '../theme/anime_theme.dart';
 
 class AppState extends ChangeNotifier {
-  static String appVersion = '1.0.1';
-  static int appBuildNumber = 2;
+  static String appVersion = '1.0.2';
+  static int appBuildNumber = 3;
   static bool _hasCheckedUpdateThisSession = false;
 
   static const MethodChannel _safBackupChannel =
@@ -61,6 +61,8 @@ class AppState extends ChangeNotifier {
   bool _isAppFocused = true;
   int _pollCountdownSeconds = 5;
   bool _isPollInFlight = false;
+  int _refreshGeneration = 0;
+  final Set<String> _simulatedTrackTrainIds = {};
 
   // Active Ride & Hybrid GPS + API State
   TrainTrip? _activeRideTrain;
@@ -122,6 +124,9 @@ class AppState extends ChangeNotifier {
       _upcomingTrains.where((t) => !t.isRecentPastDeparture).toList();
   List<TrainTrip> get recentDepartedTrains =>
       _upcomingTrains.where((t) => t.isRecentPastDeparture).toList();
+  String get scheduleDataSource => _upcomingTrains.isNotEmpty
+      ? _upcomingTrains.first.dataSource
+      : 'Polling NJT Live...';
 
   bool get isLoadingTrains => _isLoadingTrains;
   DateTime? get lastScheduleRefresh => _lastScheduleRefresh;
@@ -336,24 +341,30 @@ class AppState extends ChangeNotifier {
   // --- Station & Route Controls ---
   Future<void> setOriginAndDestination(String origCode, String destCode) async {
     if (origCode == destCode) return;
+    final bool routeChanged =
+        _originStationCode != origCode || _destinationStationCode != destCode;
     _originStationCode = origCode;
     _destinationStationCode = destCode;
-    _watchedTrainId = null;
+    if (routeChanged) {
+      _watchedTrainId = null;
+      _simulatedTrackTrainIds.clear();
+      // Immediately replace old-direction trains with real cached bidirectional
+      // NEC trains for the new direction (or empty while polling) — never invert!
+      _upcomingTrains = NjtApiService.getCachedLiveTrips(
+            originCode: origCode,
+            destinationCode: destCode,
+            activeRideTrainId: _activeRideTrain?.trainId,
+          ) ??
+          [];
+    }
     await _settingsBox.put('origin_station_code', origCode);
     await _settingsBox.put('destination_station_code', destCode);
     notifyListeners();
-    await refreshSchedules();
+    await refreshSchedules(forceNetwork: true);
   }
 
   Future<void> swapStations() async {
-    final tmp = _originStationCode;
-    _originStationCode = _destinationStationCode;
-    _destinationStationCode = tmp;
-    _watchedTrainId = null;
-    await _settingsBox.put('origin_station_code', _originStationCode);
-    await _settingsBox.put('destination_station_code', _destinationStationCode);
-    notifyListeners();
-    await refreshSchedules();
+    await setOriginAndDestination(_destinationStationCode, _originStationCode);
   }
 
   Future<void> setToWorkPreset() async {
@@ -421,7 +432,7 @@ class AppState extends ChangeNotifier {
       _cachedNjtToken = '';
       await _settingsBox.put('cached_njt_token', '');
       notifyListeners();
-      await refreshSchedules();
+      await refreshSchedules(forceNetwork: true);
       return false;
     }
 
@@ -438,7 +449,7 @@ class AppState extends ChangeNotifier {
         _cachedNjtTokenTime!.toIso8601String(),
       );
       notifyListeners();
-      await refreshSchedules();
+      await refreshSchedules(forceNetwork: true);
       return true;
     }
     notifyListeners();
@@ -470,8 +481,16 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  Future<void> refreshSchedules({bool silent = false}) async {
-    if (_isPollInFlight && silent) return;
+  Future<void> refreshSchedules({
+    bool silent = false,
+    bool forceNetwork = false,
+  }) async {
+    if (_isPollInFlight && silent && !forceNetwork) return;
+
+    final int requestGen = ++_refreshGeneration;
+    final String reqOrigin = _originStationCode;
+    final String reqDest = _destinationStationCode;
+
     _isPollInFlight = true;
     _pollCountdownSeconds = 5;
     if (!silent) {
@@ -484,15 +503,34 @@ class AppState extends ChangeNotifier {
       final previousTrains = List<TrainTrip>.from(_upcomingTrains);
 
       final fetched = await NjtApiService.fetchUpcomingTrains(
-        originCode: _originStationCode,
-        destinationCode: _destinationStationCode,
+        originCode: reqOrigin,
+        destinationCode: reqDest,
         cachedToken: token,
+        forceRefresh: forceNetwork || !silent,
+        watchedTrainId: _watchedTrainId,
+        activeRideTrainId: _activeRideTrain?.trainId,
       );
 
-      // Preserve any simulated track announcements on matching train IDs
+      // Discard stale poll results if a newer direction switch or reload started
+      if (requestGen != _refreshGeneration ||
+          reqOrigin != _originStationCode ||
+          reqDest != _destinationStationCode) {
+        return;
+      }
+
+      // Only preserve explicit Dev Test Mode simulated track overrides in the same direction
       final merged = fetched.map((t) {
-        final prev =
-            previousTrains.where((p) => p.trainId == t.trainId).firstOrNull;
+        if (!_devTestMode || !_simulatedTrackTrainIds.contains(t.trainId)) {
+          return t;
+        }
+        final prev = previousTrains
+            .where(
+              (p) =>
+                  p.trainId == t.trainId &&
+                  p.originCode == t.originCode &&
+                  p.destinationCode == t.destinationCode,
+            )
+            .firstOrNull;
         if (prev != null && prev.hasTrack && !t.hasTrack) {
           return t.copyWith(track: prev.track, status: prev.status);
         }
@@ -502,7 +540,12 @@ class AppState extends ChangeNotifier {
       // Check watched train track announcement & departure guardrail
       if (_watchedTrainId != null) {
         final watchedPrev = previousTrains
-            .where((p) => p.trainId == _watchedTrainId)
+            .where(
+              (p) =>
+                  p.trainId == _watchedTrainId &&
+                  p.originCode == reqOrigin &&
+                  p.destinationCode == reqDest,
+            )
             .firstOrNull;
         final watchedNow =
             merged.where((p) => p.trainId == _watchedTrainId).firstOrNull;
@@ -510,7 +553,7 @@ class AppState extends ChangeNotifier {
         if (watchedNow != null) {
           // Guardrail: If the watched train already departed origin and user hasn't confirmed boarding, stop watching/polling it
           if (_activeRideTrain == null &&
-              watchedNow.hasDepartedOrigin(DateTime.now())) {
+              watchedNow.hasDepartedOrigin(NjtApiService.easternNow())) {
             final departedId = watchedNow.trainId;
             _watchedTrainId = null;
             NotificationService.showCommuteAlert(
@@ -527,11 +570,26 @@ class AppState extends ChangeNotifier {
         }
       }
 
-      // If currently riding a train, also sync API stop departures if reported
+      // If currently riding a train, sync live API stop departures (even if user flipped board view!)
       if (_activeRideTrain != null) {
-        final liveMatch = merged
-            .where((t) => t.trainId == _activeRideTrain!.trainId)
+        TrainTrip? liveMatch = merged
+            .where(
+              (t) =>
+                  t.trainId == _activeRideTrain!.trainId &&
+                  t.originCode == _activeRideTrain!.originCode &&
+                  t.destinationCode == _activeRideTrain!.destinationCode,
+            )
             .firstOrNull;
+        if (liveMatch == null) {
+          final activeRouteTrips = NjtApiService.getCachedLiveTrips(
+            originCode: _activeRideTrain!.originCode,
+            destinationCode: _activeRideTrain!.destinationCode,
+            activeRideTrainId: _activeRideTrain!.trainId,
+          );
+          liveMatch = activeRouteTrips
+              ?.where((t) => t.trainId == _activeRideTrain!.trainId)
+              .firstOrNull;
+        }
         if (liveMatch != null) {
           _syncActiveRideFromApi(liveMatch);
         }
@@ -542,8 +600,11 @@ class AppState extends ChangeNotifier {
       _isLoadingTrains = false;
       _lastScheduleRefresh = DateTime.now();
     } finally {
-      _isPollInFlight = false;
-      notifyListeners();
+      if (requestGen == _refreshGeneration) {
+        _isPollInFlight = false;
+        _isLoadingTrains = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -574,6 +635,7 @@ class AppState extends ChangeNotifier {
   Future<void> simulateTrackAnnouncement(String trainId, {String? customTrack}) async {
     final idx = _upcomingTrains.indexWhere((t) => t.trainId == trainId);
     if (idx == -1) return;
+    _simulatedTrackTrainIds.add(trainId);
     final assignedTrack = customTrack ?? (originStationCode == 'NY' ? '11' : '4');
     final updated = _upcomingTrains[idx].copyWith(
       track: assignedTrack,
@@ -746,6 +808,9 @@ class AppState extends ChangeNotifier {
       status: freshTrip.status,
       track: freshTrip.track ?? _activeRideTrain!.track,
       arrivalTime: freshTrip.arrivalTime,
+      stops: freshTrip.stops.isNotEmpty
+          ? freshTrip.stops
+          : _activeRideTrain!.stops,
     );
     if (highestDepartedIdx > _currentStopIndex) {
       _advanceToStopIndex(highestDepartedIdx, source: 'NJT Live API Feed');
