@@ -19,3 +19,7 @@ Never chain `git add`, `git commit`, and `git push` into a single command with `
 
 ## Release Notes Style Rule (No External App Inspirations)
 Never reference external app inspirations in release titles, release notes, or user-facing changelog descriptions. Always highlight and describe the feature itself directly on its own merits.
+
+## Verify Live GitHub Release & APK Asset Rule
+After pushing a release or patch commit to `origin main`, NEVER tell the user the release is done until the GitHub Actions workflow has finished succeeding and you have verified via `gh release view` that the release is live in GitHub Releases with the compiled `.apk` asset uploaded and available.
+

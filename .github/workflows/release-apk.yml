@@ -45,6 +45,14 @@ jobs:
           fi
           echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
 
+      - name: Free Runner Disk Space for Android NDK
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/ndk" ]; then
+            find "${ANDROID_HOME}/ndk" -mindepth 1 -maxdepth 1 ! -name "28.2*" -exec sudo rm -rf {} +
+          fi
+          df -h /
+
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
