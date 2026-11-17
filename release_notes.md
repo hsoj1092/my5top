@@ -1,17 +1,20 @@
-# v1.0.3 — Randomized Japanese Streetscape Diorama, Compact Train Board & Persistent Active Ride Resume 🚆🗾
+# v1.0.4 — Streamlined Commuter Departure Board, Unified Route Bar & Collapsible En-Route View 🚆✨
 
-### ✨ What's New in v1.0.3
+### ✨ What's New in v1.0.4
 
-#### 🗾 Randomized Japanese Streetscape & Trip-Synced Mountain
-- **Trip-Progress Horizon Mountain**: The snow-capped mountain in the background now moves smoothly across the sky in sync with your overall trip progress (`0%` → `100%`), exiting off the horizon as you approach your destination.
-- **New Japanese Streetscape Landmarks & Shops**: Alongside the classic **Red Torii Arches**, rides now pass **Lawson**, **7-Eleven**, a cozy **Ramen Shop** (with swaying red lanterns and split noren curtains), **Traditional Wooden Machiya Houses**, **Modern 2-Story Japanese Homes**, **Narrow Multi-Story Town Buildings**, and **Tea-House Pavilions with Street Vending Machines**.
-- **Unique Every Check-In**: Boarding a train selects one of **5 curated streetscape variations** combined with seeded per-slot randomization so every commute feels fresh.
+#### 🧭 Slim Unified Route & Quick-Alert Bar
+- **Unified Commute Header**: Combined the **To Home / To Work** segmented direction switcher, a single **`🔔 ≤X stops`** Quick Alert pill, and compact 2-line **Origin ⇄ Destination** station selectors into one clean card so upcoming departures appear immediately above the fold without scrolling.
+- **Calm Live Sync Indicator**: Replaced the ticking second-by-second sync string with a clean tap-to-refresh **`● Live • HH:MM`** status pill alongside the **Upcoming** header.
 
-#### 📋 Compact Upcoming Board & Standout "Just Departed" Section
-- **Streamlined Upcoming List + Load More**: Shows the next **3** upcoming trains based on the current time with a **Load More Trains** button to expand additional departures (`+4` at a time) and a **Show Fewer Trains** toggle to collapse back down.
-- **Highlighted "Just Departed" Wrapper**: En-route departed trains now sit inside an accent-tinted card wrapper with a larger header and `EN ROUTE` pill badge so they stand out clearly from upcoming departures.
-- **Train Tile Layout & Overflow Fixes**: Fixed horizontal text overflow on train cards and section headers when long live statuses (such as `En Route → Newark Penn`) or scaled system font sizes are displayed.
+#### 🎀 Compact Mascot Companion Strip
+- **Single-Row Home Companion**: Condensed the main screen's animated conductor banner into a sleek single-row companion strip featuring the animated mascot avatar and live commute guidance, while preserving the full interactive mascot card during active rides.
+- **Streamlined Top Bar**: Simplified the top app bar to the **`my5top`** badge (with high-contrast dark and light palette styling), **Refresh**, and **Settings** controls.
 
-#### 🔄 Automatic Active Ride Resume & 20-Minute Staleness Cutoff
-- **Seamless App Reopen**: Closing and reopening the app while tracking a train now brings you straight back to the live tracked train screen, preserving your stop progress, alert history, and streetscape variation.
-- **Smart 20-Minute Arrival Cutoff**: If the app is reopened **20 minutes or more** after the tracked train's arrival time, the completed trip is automatically archived to your ride log and the app opens directly to the main train departure board.
+#### 🚆 Scannable 2-Row Departure Cards & Live Countdowns
+- **At-a-Glance Departure Countdowns**: Upcoming train cards now display relative departure chips (**`Now`**, **`in 8m`**, **`Boarding`**) directly beside **`Departure → Arrival`** times for instant platform decision-making.
+- **Clean 2-Row Card Hierarchy**: Replaced stacked badge borders with crisp plain-text trip metadata (**`#trainId • ⚡ Express • 38m • 3 stops`**), surfacing secondary status lines only when non-routine (delayed, cancelled, or en-route).
+- **Contextual Board Emphasis**: Highlighted the primary next upcoming train (and any active ride) with a solid accent **`Board`** button while keeping subsequent departures in a clean outlined style.
+
+#### 📂 Collapsible "Already on board?" En-Route Accordion
+- **1-Tap En-Route Expansion**: Recently departed en-route trains are now tucked neatly into a collapsible **`Already on board? • X trains`** (**`EN ROUTE`**) accordion at the bottom of the board—collapsed by default when upcoming trains are available and expandable with a single tap to check in mid-ride.
+- **Bottom Sheet Polish**: Added proper Material surface elevation and dynamic system navigation bar inset handling across train detail and quick alert settings sheets.

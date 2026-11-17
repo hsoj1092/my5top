@@ -21,8 +21,8 @@ import '../services/notification_service.dart';
 import '../theme/anime_theme.dart';
 
 class AppState extends ChangeNotifier {
-  static String appVersion = '1.0.3';
-  static int appBuildNumber = 4;
+  static String appVersion = '1.0.4';
+  static int appBuildNumber = 5;
   static bool _hasCheckedUpdateThisSession = false;
   static const Duration activeRideStalenessThreshold = Duration(minutes: 20);
 

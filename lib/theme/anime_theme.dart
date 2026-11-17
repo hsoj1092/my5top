@@ -226,7 +226,7 @@ class AnimeThemePalette {
     }
 
     return isSakura
-        ? '✿ Otsukaresama! Ready for your $originShort → $destShort commute? Pick a train below~'
-        : '✦ Ready at $originShort → $destShort. Pick your train to watch its track or confirm boarding!';
+        ? 'Otsukaresama! Pick a train below to watch its track or hop aboard~'
+        : 'Ready on the platform. Tap a train to watch its track or start your ride.';
   }
 }

@@ -590,8 +590,40 @@ void main() {
       }
     });
 
+    test('TrainTrip minutesUntilDeparture and formatCountdownLabel compute crisp commuter tags',
+        () {
+      final refNow = DateTime(2026, 11, 17, 17, 15, 0);
+      final upcomingTrip = TrainTrip(
+        trainId: '3865',
+        line: 'Northeast Corridor',
+        lineBadge: 'NEC',
+        originCode: 'NY',
+        destinationCode: 'MP',
+        finalDestinationName: 'Trenton',
+        departureTime: '5:23 PM',
+        arrivalTime: '6:01 PM',
+        departureDateTime: DateTime(2026, 11, 17, 17, 23, 0),
+        durationMinutes: 38,
+        status: 'On Time',
+        isExpress: true,
+        isRecentPastDeparture: false,
+        dataSource: 'NJT DepartureVision Live',
+        stops: const [],
+      );
+
+      expect(upcomingTrip.minutesUntilDeparture(refNow), equals(8));
+      expect(TrainTrip.formatCountdownLabel(8), equals('in 8m'));
+      expect(TrainTrip.formatCountdownLabel(0), equals('Now'));
+      expect(TrainTrip.formatCountdownLabel(60), equals('in 1h'));
+      expect(TrainTrip.formatCountdownLabel(74), equals('in 1h 14m'));
+
+      // Recent past departure returns null countdown
+      final departedTrip = upcomingTrip.copyWith(isRecentPastDeparture: true);
+      expect(departedTrip.minutesUntilDeparture(refNow), isNull);
+    });
+
     testWidgets(
-        'HomeScreen shows 3 upcoming trains with Load More button and renders Just Departed tiles without overflow',
+        'HomeScreen renders compact mascot strip, unified route bar, 2-row cards, Load More, and collapsible En Route accordion without overflow',
         (WidgetTester tester) async {
       late Directory tempDir;
       late AppState appState;
@@ -657,15 +689,28 @@ void main() {
       await tester.pump();
       expect(tester.takeException(), isNull);
 
+      // Slim Unified Route Bar controls render cleanly without old 3-chip clutter
+      expect(find.text('To Home'), findsOneWidget);
+      expect(find.text('To Work'), findsOneWidget);
+      expect(find.text('≤2 stops'), findsOneWidget);
+      expect(find.text('Every Stop: OFF'), findsNothing);
+
       // Initially only the first 3 upcoming trains are shown; trains 4..6 are hidden behind Load More
       expect(find.text('#${upcoming[0].trainId}'), findsOneWidget);
       expect(find.text('#${upcoming[2].trainId}'), findsOneWidget);
       expect(find.text('#${upcoming[3].trainId}'), findsNothing);
       expect(find.text('Load More Trains (3 more)'), findsOneWidget);
 
-      // Standout Just Departed wrapper & long En Route status render cleanly without overflow
-      expect(find.text('Just Departed (NY → MP)'), findsOneWidget);
+      // En Route accordion starts collapsed by default to keep Home screen clean
+      expect(find.textContaining('Already on board?'), findsOneWidget);
       expect(find.text('EN ROUTE'), findsOneWidget);
+      expect(find.text('En Route → Newark Penn'), findsNothing);
+
+      // Tap En Route accordion -> expands departed trains cleanly without overflow
+      await tester.tap(find.text('EN ROUTE'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('12:35 PM'), findsOneWidget);
       expect(find.text('En Route → Newark Penn'), findsOneWidget);
 
       // Tap Load More -> reveals remaining 3 trains and offers Show Fewer Trains
@@ -675,6 +720,13 @@ void main() {
       expect(find.text('#${upcoming[3].trainId}'), findsOneWidget);
       expect(find.text('#${upcoming[5].trainId}'), findsOneWidget);
       expect(find.text('Show Fewer Trains'), findsOneWidget);
+
+      // Tap Quick Alert pill -> opens Quick Commute Alert Settings sheet
+      await tester.tap(find.text('≤2 stops'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(tester.takeException(), isNull);
+      expect(find.text('Quick Commute Alert Settings'), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox.shrink());
     });

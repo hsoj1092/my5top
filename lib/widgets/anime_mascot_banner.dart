@@ -7,7 +7,8 @@ class AnimeMascotBanner extends StatefulWidget {
   final String message;
   final bool isExcited;
   final bool isRiding;
-  final VoidCallback onToggleThemeStyle;
+  final bool compact;
+  final VoidCallback? onToggleThemeStyle;
 
   const AnimeMascotBanner({
     super.key,
@@ -15,7 +16,8 @@ class AnimeMascotBanner extends StatefulWidget {
     required this.message,
     this.isExcited = false,
     this.isRiding = false,
-    required this.onToggleThemeStyle,
+    this.compact = false,
+    this.onToggleThemeStyle,
   });
 
   @override
@@ -45,12 +47,17 @@ class _AnimeMascotBannerState extends State<AnimeMascotBanner>
   Widget build(BuildContext context) {
     final pal = widget.palette;
     final isSakura = pal.id == 'sakura';
+    final isCompact = widget.compact;
+    final radius = BorderRadius.circular(isCompact ? 18 : 24);
 
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) {
         final t = _controller.value;
-        final bounce = math.sin(t * 2 * math.pi) * (widget.isExcited ? 4.5 : 2.5);
+        final bounceAmp = isCompact
+            ? (widget.isExcited ? 2.0 : 1.2)
+            : (widget.isExcited ? 4.5 : 2.5);
+        final bounce = math.sin(t * 2 * math.pi) * bounceAmp;
 
         return Container(
           decoration: BoxDecoration(
@@ -58,20 +65,31 @@ class _AnimeMascotBannerState extends State<AnimeMascotBanner>
               colors: isSakura
                   ? [
                       pal.cardBg,
-                      pal.primaryAccent.withOpacity(pal.isDark ? 0.18 : 0.10),
+                      pal.primaryAccent.withOpacity(
+                        isCompact
+                            ? (pal.isDark ? 0.13 : 0.07)
+                            : (pal.isDark ? 0.18 : 0.10),
+                      ),
                     ]
                   : [
                       pal.cardBg,
-                      pal.primaryAccent.withOpacity(pal.isDark ? 0.16 : 0.08),
+                      pal.primaryAccent.withOpacity(
+                        isCompact
+                            ? (pal.isDark ? 0.11 : 0.06)
+                            : (pal.isDark ? 0.16 : 0.08),
+                      ),
                     ],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: pal.cardBorder, width: 1.4),
+            borderRadius: radius,
+            border: Border.all(
+              color: pal.cardBorder,
+              width: isCompact ? 1.1 : 1.4,
+            ),
           ),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(24),
+            borderRadius: radius,
             child: Stack(
               children: [
                 // Subtle animated starry rain / sakura petals background
@@ -81,137 +99,219 @@ class _AnimeMascotBannerState extends State<AnimeMascotBanner>
                       progress: t,
                       isSakura: isSakura,
                       color: pal.primaryAccent,
+                      particleCount: isCompact ? 4 : 8,
                     ),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      // Chibi Conductor / Navigator Avatar
-                      Transform.translate(
-                        offset: Offset(0, bounce),
-                        child: Container(
-                          width: 66,
-                          height: 66,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: pal.primaryAccent.withOpacity(0.15),
-                            border: Border.all(
-                              color: widget.isExcited
-                                  ? pal.urgentColor
-                                  : pal.primaryAccent,
-                              width: 2.2,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: (widget.isExcited
-                                        ? pal.urgentColor
-                                        : pal.primaryAccent)
-                                    .withOpacity(0.28),
-                                blurRadius: 12,
+                if (isCompact)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Transform.translate(
+                          offset: Offset(0, bounce),
+                          child: Container(
+                            width: 38,
+                            height: 38,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: pal.primaryAccent.withOpacity(0.14),
+                              border: Border.all(
+                                color: widget.isExcited
+                                    ? pal.urgentColor
+                                    : pal.primaryAccent,
+                                width: 1.8,
                               ),
-                            ],
-                          ),
-                          child: CustomPaint(
-                            painter: _ChibiConductorPainter(
-                              isSakura: isSakura,
-                              isExcited: widget.isExcited,
-                              isRiding: widget.isRiding,
-                              blinkPhase: t,
-                              primaryColor: pal.primaryAccent,
-                              urgentColor: pal.urgentColor,
+                            ),
+                            child: FittedBox(
+                              fit: BoxFit.contain,
+                              child: SizedBox(
+                                width: 66,
+                                height: 66,
+                                child: CustomPaint(
+                                  painter: _ChibiConductorPainter(
+                                    isSakura: isSakura,
+                                    isExcited: widget.isExcited,
+                                    isRiding: widget.isRiding,
+                                    blinkPhase: t,
+                                    primaryColor: pal.primaryAccent,
+                                    urgentColor: pal.urgentColor,
+                                  ),
+                                ),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text.rich(
+                            TextSpan(
                               children: [
-                                Flexible(
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 9,
-                                      vertical: 3.5,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: pal.primaryAccent.withOpacity(0.18),
-                                      borderRadius: BorderRadius.circular(99),
-                                    ),
-                                    child: Text(
-                                      '${pal.mascotName} • ${pal.mascotTitle}',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 10.5,
-                                        fontWeight: FontWeight.w700,
-                                        color: pal.primaryAccent,
-                                      ),
-                                    ),
+                                TextSpan(
+                                  text: '${pal.mascotName} • ',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w800,
+                                    color: pal.primaryAccent,
                                   ),
                                 ),
-                                const SizedBox(width: 8),
-                                InkWell(
-                                  onTap: widget.onToggleThemeStyle,
-                                  borderRadius: BorderRadius.circular(99),
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: pal.secondaryAccent.withOpacity(0.18),
-                                      borderRadius: BorderRadius.circular(99),
-                                      border: Border.all(
-                                        color: pal.secondaryAccent.withOpacity(0.45),
-                                      ),
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          isSakura
-                                              ? Icons.local_florist_rounded
-                                              : Icons.nightlight_round,
-                                          size: 12,
-                                          color: pal.secondaryAccent,
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          isSakura ? 'Sakura' : 'MyGO',
-                                          style: TextStyle(
-                                            fontSize: 10.5,
-                                            fontWeight: FontWeight.w700,
-                                            color: pal.textPrimary,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                                TextSpan(
+                                  text: widget.message,
+                                  style: TextStyle(
+                                    fontSize: 12.2,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.28,
+                                    color: pal.textPrimary,
                                   ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              widget.message,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                height: 1.35,
-                                color: pal.textPrimary,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        // Chibi Conductor / Navigator Avatar
+                        Transform.translate(
+                          offset: Offset(0, bounce),
+                          child: Container(
+                            width: 66,
+                            height: 66,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: pal.primaryAccent.withOpacity(0.15),
+                              border: Border.all(
+                                color: widget.isExcited
+                                    ? pal.urgentColor
+                                    : pal.primaryAccent,
+                                width: 2.2,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: (widget.isExcited
+                                          ? pal.urgentColor
+                                          : pal.primaryAccent)
+                                      .withOpacity(0.28),
+                                  blurRadius: 12,
+                                ),
+                              ],
+                            ),
+                            child: CustomPaint(
+                              painter: _ChibiConductorPainter(
+                                isSakura: isSakura,
+                                isExcited: widget.isExcited,
+                                isRiding: widget.isRiding,
+                                blinkPhase: t,
+                                primaryColor: pal.primaryAccent,
+                                urgentColor: pal.urgentColor,
                               ),
                             ),
-                          ],
+                          ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 9,
+                                        vertical: 3.5,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color:
+                                            pal.primaryAccent.withOpacity(0.18),
+                                        borderRadius: BorderRadius.circular(99),
+                                      ),
+                                      child: Text(
+                                        '${pal.mascotName} • ${pal.mascotTitle}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 10.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: pal.primaryAccent,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  if (widget.onToggleThemeStyle != null) ...[
+                                    const SizedBox(width: 8),
+                                    InkWell(
+                                      onTap: widget.onToggleThemeStyle,
+                                      borderRadius: BorderRadius.circular(99),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: pal.secondaryAccent
+                                              .withOpacity(0.18),
+                                          borderRadius:
+                                              BorderRadius.circular(99),
+                                          border: Border.all(
+                                            color: pal.secondaryAccent
+                                                .withOpacity(0.45),
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              isSakura
+                                                  ? Icons.local_florist_rounded
+                                                  : Icons.nightlight_round,
+                                              size: 12,
+                                              color: pal.secondaryAccent,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              isSakura ? 'Sakura' : 'MyGO',
+                                              style: TextStyle(
+                                                fontSize: 10.5,
+                                                fontWeight: FontWeight.w700,
+                                                color: pal.textPrimary,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                widget.message,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.35,
+                                  color: pal.textPrimary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
               ],
             ),
           ),
@@ -225,17 +325,19 @@ class _AnimeParticlesPainter extends CustomPainter {
   final double progress;
   final bool isSakura;
   final Color color;
+  final int particleCount;
 
   _AnimeParticlesPainter({
     required this.progress,
     required this.isSakura,
     required this.color,
+    this.particleCount = 8,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()..color = color.withOpacity(0.16);
-    const count = 8;
+    final count = particleCount;
     for (int i = 0; i < count; i++) {
       final seed = (i * 0.137) % 1.0;
       final x = ((seed * size.width) + (progress * 30 * (i.isEven ? 1 : -1))) %
@@ -268,7 +370,9 @@ class _AnimeParticlesPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _AnimeParticlesPainter oldDelegate) =>
-      oldDelegate.progress != progress || oldDelegate.isSakura != isSakura;
+      oldDelegate.progress != progress ||
+      oldDelegate.isSakura != isSakura ||
+      oldDelegate.particleCount != particleCount;
 }
 
 class _ChibiConductorPainter extends CustomPainter {

@@ -144,6 +144,30 @@ class TrainTrip {
     return false;
   }
 
+  /// Whole minutes from [easternNow] until scheduled/estimated origin departure.
+  /// Returns null if already marked as a recent past departure or unparseable.
+  int? minutesUntilDeparture(
+    DateTime easternNow, {
+    DateTime? parsedDeparture,
+  }) {
+    if (isRecentPastDeparture) return null;
+    final dep = departureDateTime ?? parsedDeparture;
+    if (dep == null) return null;
+    final diffSeconds = dep.difference(easternNow).inSeconds;
+    if (diffSeconds <= -90) return null;
+    if (diffSeconds <= 30) return 0;
+    return (diffSeconds / 60).ceil();
+  }
+
+  /// Formats [minutes] into a compact commuter countdown tag (e.g. 'Now', 'in 6m', 'in 1h 12m').
+  static String formatCountdownLabel(int minutes) {
+    if (minutes <= 0) return 'Now';
+    if (minutes < 60) return 'in ${minutes}m';
+    final hrs = minutes ~/ 60;
+    final rem = minutes % 60;
+    return rem == 0 ? 'in ${hrs}h' : 'in ${hrs}h ${rem}m';
+  }
+
   TrainTrip copyWith({
     String? trainId,
     String? line,
