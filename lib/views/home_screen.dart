@@ -168,7 +168,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ? NjtApiService.formatTime12h(appState.lastScheduleRefresh!)
             : null;
 
-        return Scaffold(
+        return PopScope(
+          canPop: !appState.isBackgroundGuardActive,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop && appState.isBackgroundGuardActive) {
+              NotificationService.moveToBackground();
+            }
+          },
+          child: Scaffold(
           backgroundColor: pal.scaffoldBg,
           appBar: AppBar(
             toolbarHeight: 52,
@@ -578,14 +585,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             vertical: 4,
                           ),
                           decoration: BoxDecoration(
-                            color: pal.cardBg,
+                            color: appState.isFastTrackPolling
+                                ? pal.trackBadgeBg.withOpacity(0.16)
+                                : pal.cardBg,
                             borderRadius: BorderRadius.circular(99),
-                            border: Border.all(color: pal.cardBorder),
+                            border: Border.all(
+                              color: appState.isFastTrackPolling
+                                  ? pal.trackBadgeBg
+                                  : pal.cardBorder,
+                            ),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              if (appState.isLoadingTrains)
+                              if (appState.isFastTrackPolling)
+                                Icon(
+                                  Icons.bolt_rounded,
+                                  size: 13,
+                                  color: pal.trackBadgeBg,
+                                )
+                              else if (appState.isLoadingTrains)
                                 Icon(
                                   Icons.sync_rounded,
                                   size: 12,
@@ -604,21 +623,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 ),
                               const SizedBox(width: 5),
                               Text(
-                                appState.isLoadingTrains
-                                    ? 'Syncing...'
-                                    : appState.isPollingActive
-                                        ? (lastCheckedShort != null
-                                            ? 'Live • $lastCheckedShort'
-                                            : 'Live')
-                                        : (lastCheckedShort != null
-                                            ? 'Updated $lastCheckedShort'
-                                            : 'Tap to refresh'),
+                                appState.isFastTrackPolling
+                                    ? '1s Track Watch'
+                                    : appState.isLoadingTrains
+                                        ? 'Syncing...'
+                                        : appState.isPollingActive
+                                            ? (lastCheckedShort != null
+                                                ? 'Live • $lastCheckedShort'
+                                                : 'Live')
+                                            : (lastCheckedShort != null
+                                                ? 'Updated $lastCheckedShort'
+                                                : 'Tap to refresh'),
                                 style: TextStyle(
                                   fontSize: 10.8,
                                   fontWeight: FontWeight.w700,
-                                  color: appState.isLoadingTrains
-                                      ? pal.primaryAccent
-                                      : pal.textSecondary,
+                                  color: appState.isFastTrackPolling
+                                      ? pal.trackBadgeBg
+                                      : appState.isLoadingTrains
+                                          ? pal.primaryAccent
+                                          : pal.textSecondary,
                                 ),
                               ),
                             ],
@@ -877,6 +900,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
+        ),
         );
       },
     );
@@ -1248,7 +1272,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               children: [
                                 Icon(
                                   isWatched
-                                      ? Icons.visibility_rounded
+                                      ? (appState.isFastTrackPolling
+                                          ? Icons.bolt_rounded
+                                          : Icons.visibility_rounded)
                                       : Icons.notifications_none_rounded,
                                   size: 12,
                                   color: isWatched
@@ -1257,7 +1283,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 ),
                                 const SizedBox(width: 3.5),
                                 Text(
-                                  isWatched ? 'Watching' : 'Watch Track',
+                                  isWatched
+                                      ? (appState.isFastTrackPolling
+                                          ? '1s Watch'
+                                          : 'Watching')
+                                      : 'Watch Track',
                                   style: TextStyle(
                                     fontSize: 10.5,
                                     fontWeight: FontWeight.w700,
@@ -1826,6 +1856,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _showQuickRulesSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
         return Consumer<AppState>(
@@ -1843,7 +1874,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               clipBehavior: Clip.antiAlias,
               child: SafeArea(
                 top: false,
-                child: Padding(
+                child: SingleChildScrollView(
                   padding: const EdgeInsets.all(20),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -1947,6 +1978,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         activeColor: pal.trackBadgeBg,
                         onChanged: (v) => appState.updateNotificationRules(
                           rules.copyWith(notifyOnTrackAssigned: v),
+                        ),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Headphone sound on Silent/Vibrate'),
+                        subtitle: Text(
+                          'Plays strictly in connected headphones (never speakers)',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: pal.textSecondary,
+                          ),
+                        ),
+                        value: rules.headphoneAudioBypass,
+                        activeColor: pal.primaryAccent,
+                        onChanged: (v) => appState.updateNotificationRules(
+                          rules.copyWith(headphoneAudioBypass: v),
                         ),
                       ),
                     ],

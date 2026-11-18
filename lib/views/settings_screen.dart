@@ -529,6 +529,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     rules.copyWith(finalWakeUpAlarm: !rules.finalWakeUpAlarm),
                   ),
                 ),
+                _buildPreferenceTile(
+                  context: context,
+                  icon: Icons.headphones_rounded,
+                  title: 'Headphone sound on Silent/Vibrate',
+                  subtitle:
+                      'Play alert sound strictly through connected wired/Bluetooth headphones even when phone is on Silent or Vibrate (never phone speakers)',
+                  trailing: Switch(
+                    value: rules.headphoneAudioBypass,
+                    activeColor: pal.primaryAccent,
+                    onChanged: (v) => appState.updateNotificationRules(
+                      rules.copyWith(headphoneAudioBypass: v),
+                    ),
+                  ),
+                  onTap: () => appState.updateNotificationRules(
+                    rules.copyWith(
+                      headphoneAudioBypass: !rules.headphoneAudioBypass,
+                    ),
+                  ),
+                ),
 
                 _buildSectionDivider(context),
 

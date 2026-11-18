@@ -1,21 +1,12 @@
 package com.my5top.commute
 
 import android.app.Activity
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
-import androidx.core.app.NotificationCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -37,18 +28,12 @@ class MainActivity : FlutterActivity() {
         private const val REQUEST_OPEN_BACKUP = 9002
         private const val REQUEST_PICK_DIRECTORY = 9003
         private const val REQUEST_NOTIF_PERMISSION = 9004
-
-        private const val CHANNEL_LIVE_RIDE = "my5top_live_ride"
-        private const val CHANNEL_STOP_ALERT = "my5top_stop_alert"
-        private const val CHANNEL_TRACK_ALERT = "my5top_track_alert"
-        private const val CHANNEL_ARRIVAL_ALARM = "my5top_arrival_alarm"
-
-        private const val NOTIF_ID_LIVE_RIDE = 5001
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        ensureNotificationChannels()
+        CommuteAlertHelper.ensureNotificationChannels(this)
+        CommuteForegroundService.onUiAttached(applicationContext)
 
         val backupChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, safChannelName)
         safChannel = backupChannel
@@ -94,12 +79,18 @@ class MainActivity : FlutterActivity() {
                     val subText = call.argument<String>("subText") ?: "my5top"
                     val passedStops = call.argument<Int>("passedStops") ?: 0
                     val totalStops = call.argument<Int>("totalStops") ?: 1
-                    showRideProgressNotification(title, body, subText, passedStops, totalStops)
+                    CommuteAlertHelper.showRideProgressNotification(
+                        this,
+                        title,
+                        body,
+                        subText,
+                        passedStops,
+                        totalStops
+                    )
                     result.success(true)
                 }
                 "cancelRideProgress" -> {
-                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    nm.cancel(NOTIF_ID_LIVE_RIDE)
+                    CommuteAlertHelper.cancelRideProgressNotification(this)
                     result.success(true)
                 }
                 "showAlert" -> {
@@ -108,62 +99,49 @@ class MainActivity : FlutterActivity() {
                     val title = call.argument<String>("title") ?: "my5top Alert"
                     val body = call.argument<String>("body") ?: ""
                     val vibrate = call.argument<Boolean>("vibrate") ?: true
-                    showCommuteAlertNotification(id, type, title, body, vibrate)
+                    val headphoneAudioBypass = call.argument<Boolean>("headphoneAudioBypass") ?: true
+                    CommuteAlertHelper.showCommuteAlertNotification(
+                        this,
+                        id,
+                        type,
+                        title,
+                        body,
+                        vibrate,
+                        headphoneAudioBypass
+                    )
                     result.success(true)
+                }
+                "startBackgroundGuard" -> {
+                    val payloadJson = call.argument<String>("payloadJson") ?: ""
+                    if (payloadJson.isNotBlank()) {
+                        CommuteForegroundService.startOrUpdate(applicationContext, payloadJson)
+                    }
+                    result.success(true)
+                }
+                "stopBackgroundGuard" -> {
+                    CommuteForegroundService.stopService(applicationContext)
+                    result.success(true)
+                }
+                "syncBackgroundState" -> {
+                    CommuteForegroundService.onUiAttached(applicationContext)
+                    val updates = CommuteForegroundService.consumeBackgroundUpdates(applicationContext)
+                    result.success(updates)
+                }
+                "moveToBackground" -> {
+                    val moved = moveTaskToBack(true)
+                    result.success(moved)
+                }
+                "isHeadphonesConnected" -> {
+                    result.success(CommuteAlertHelper.isHeadphonesConnected(this))
                 }
                 else -> result.notImplemented()
             }
         }
     }
 
-    private fun ensureNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-            val rideChannel = NotificationChannel(
-                CHANNEL_LIVE_RIDE,
-                "Live Ride Progress",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Persistent live train stop countdown & ETA"
-                setShowBadge(false)
-            }
-
-            val stopChannel = NotificationChannel(
-                CHANNEL_STOP_ALERT,
-                "Stop Countdown Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Alerts per stop or when X stops away from destination"
-                enableVibration(true)
-            }
-
-            val trackChannel = NotificationChannel(
-                CHANNEL_TRACK_ALERT,
-                "Track Assignment Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Immediate alert when your NJ Transit track number is posted"
-                enableVibration(true)
-            }
-
-            val arrivalChannel = NotificationChannel(
-                CHANNEL_ARRIVAL_ALARM,
-                "Destination Wake-Up Alarm",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Urgent wake-up alert when approaching your destination station"
-                enableVibration(true)
-            }
-
-            nm.createNotificationChannels(
-                listOf(rideChannel, stopChannel, trackChannel, arrivalChannel)
-            )
-        }
-    }
-
     override fun onPostResume() {
         super.onPostResume()
+        CommuteForegroundService.onUiAttached(applicationContext)
         if (!requestedNotifOnResume) {
             requestedNotifOnResume = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -181,6 +159,11 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onDestroy() {
+        CommuteForegroundService.onUiDetached(applicationContext)
+        super.onDestroy()
+    }
+
     private fun requestNotificationPermission(result: MethodChannel.Result) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val perm = "android.permission.POST_NOTIFICATIONS"
@@ -191,108 +174,6 @@ class MainActivity : FlutterActivity() {
         result.success(true)
     }
 
-    private fun createLaunchPendingIntent(): PendingIntent {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        return PendingIntent.getActivity(this, 0, intent, flags)
-    }
-
-    private fun showRideProgressNotification(
-        title: String,
-        body: String,
-        subText: String,
-        passedStops: Int,
-        totalStops: Int
-    ) {
-        try {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val safeTotal = if (totalStops < 1) 1 else totalStops
-            val safePassed = passedStops.coerceIn(0, safeTotal)
-
-            val builder = NotificationCompat.Builder(this, CHANNEL_LIVE_RIDE)
-                .setSmallIcon(android.R.drawable.ic_dialog_map)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setSubText(subText)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setProgress(safeTotal, safePassed, false)
-                .setContentIntent(createLaunchPendingIntent())
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-
-            nm.notify(NOTIF_ID_LIVE_RIDE, builder.build())
-        } catch (_: Throwable) {}
-    }
-
-    private fun showCommuteAlertNotification(
-        id: Int,
-        type: String,
-        title: String,
-        body: String,
-        vibrate: Boolean
-    ) {
-        try {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val channelId = when (type) {
-                "track" -> CHANNEL_TRACK_ALERT
-                "arrival" -> CHANNEL_ARRIVAL_ALARM
-                else -> CHANNEL_STOP_ALERT
-            }
-
-            val soundUri = if (type == "arrival") {
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            } else {
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            }
-
-            val builder = NotificationCompat.Builder(this, channelId)
-                .setSmallIcon(android.R.drawable.ic_popup_reminder)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-                .setAutoCancel(true)
-                .setSound(soundUri)
-                .setContentIntent(createLaunchPendingIntent())
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setDefaults(NotificationCompat.DEFAULT_ALL)
-
-            nm.notify(id, builder.build())
-
-            if (vibrate) {
-                triggerVibration(type)
-            }
-        } catch (_: Throwable) {}
-    }
-
-    private fun triggerVibration(type: String) {
-        try {
-            val pattern = when (type) {
-                "arrival" -> longArrayOf(0, 400, 150, 400, 150, 600)
-                "track" -> longArrayOf(0, 250, 120, 350)
-                else -> longArrayOf(0, 180, 100, 180)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                vm.defaultVibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
-            } else {
-                @Suppress("DEPRECATION")
-                val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    v.vibrate(VibrationEffect.createWaveform(pattern, -1))
-                } else {
-                    @Suppress("DEPRECATION")
-                    v.vibrate(pattern, -1)
-                }
-            }
-        } catch (_: Throwable) {}
-    }
 
     private fun launchCreateBackupDocument(
         fileName: String,

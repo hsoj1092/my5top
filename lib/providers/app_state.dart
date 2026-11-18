@@ -21,8 +21,8 @@ import '../services/notification_service.dart';
 import '../theme/anime_theme.dart';
 
 class AppState extends ChangeNotifier {
-  static String appVersion = '1.0.4';
-  static int appBuildNumber = 5;
+  static String appVersion = '1.0.5';
+  static int appBuildNumber = 6;
   static bool _hasCheckedUpdateThisSession = false;
   static const Duration activeRideStalenessThreshold = Duration(minutes: 20);
 
@@ -59,6 +59,81 @@ class AppState extends ChangeNotifier {
     return nowEastern.difference(arrivalEastern) >= maxStaleness;
   }
 
+  // Fast 1-second Track Watch polling burst window (11m down to 9m before departure)
+  static const int fastTrackWatchStartSeconds = 11 * 60; // 660s before departure
+  static const int fastTrackWatchEndSeconds = 9 * 60; // 540s guardrail for On Time trains
+  static const Duration fastTrackWatchMaxBurstDuration = Duration(minutes: 8);
+  static const Duration postArrivalGuardGracePeriod = Duration(minutes: 2);
+
+  /// Returns `true` when a train's DepartureVision status indicates a delay,
+  /// hold, standby, or other non-routine condition outside normal "On Time".
+  static bool isTrainNonRoutineCondition(String status) {
+    final s = status.trim().toLowerCase();
+    if (s.isEmpty ||
+        s == 'on time' ||
+        s == 'ontime' ||
+        s == 'scheduled' ||
+        s == 'track tba') {
+      return false;
+    }
+    if (RegExp(r'^in\s+\d+\s*min').hasMatch(s)) {
+      return false;
+    }
+    if (s.contains('cancel')) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Evaluates whether 1-second lightweight Track Watch polling should be active.
+  ///
+  /// - Activates at the **11-minute mark** before departure (`<= 660s`).
+  /// - Stops immediately once a track is posted, the train departs, or is cancelled.
+  /// - For normal ("On Time") trains, stops at the **9-minute guardrail** (`< 540s`).
+  /// - For delayed or non-routine conditions, extends past the 9-minute mark
+  ///   (up to [fastTrackWatchMaxBurstDuration] continuous burst or 15m past scheduled
+  ///   departure) so late track postings are still caught accurately.
+  static bool shouldUseFastTrackWatchPolling({
+    required TrainTrip? watchedTrip,
+    required DateTime nowEastern,
+    DateTime? fastBurstStartedAt,
+    DateTime? rateLimitBackoffUntil,
+  }) {
+    if (watchedTrip == null) return false;
+    if (watchedTrip.hasTrack) return false;
+    if (watchedTrip.hasDepartedOrigin(nowEastern)) return false;
+    if (watchedTrip.status.toLowerCase().contains('cancel')) return false;
+    if (rateLimitBackoffUntil != null &&
+        nowEastern.isBefore(rateLimitBackoffUntil)) {
+      return false;
+    }
+
+    final depEast = watchedTrip.departureDateTime ??
+        NjtApiService.parseNjtTime(watchedTrip.departureTime, nowEastern);
+    if (depEast == null) return false;
+
+    final secondsUntilDep = depEast.difference(nowEastern).inSeconds;
+    if (secondsUntilDep > fastTrackWatchStartSeconds) {
+      return false;
+    }
+
+    // Standard 11-minute to 9-minute window for On Time trains
+    if (secondsUntilDep >= fastTrackWatchEndSeconds) {
+      return true;
+    }
+
+    // Exception: Delayed or other non-"On Time" conditions extend past 9-minute guardrail
+    // with a hard 8-minute continuous burst cap for battery & API safety.
+    if (isTrainNonRoutineCondition(watchedTrip.status) &&
+        secondsUntilDep >= -900) {
+      if (fastBurstStartedAt == null) return true;
+      return nowEastern.difference(fastBurstStartedAt) <=
+          fastTrackWatchMaxBurstDuration;
+    }
+
+    return false;
+  }
+
   static const MethodChannel _safBackupChannel =
       MethodChannel('com.my5top.commute/saf_backup');
 
@@ -87,15 +162,21 @@ class AppState extends ChangeNotifier {
   String _cachedNjtToken = '';
   DateTime? _cachedNjtTokenTime;
 
-  // Upcoming Trains & Track Watcher + Smart 5-Second Polling
+  // Upcoming Trains & Track Watcher + Smart 5s / 1s Burst Polling
   List<TrainTrip> _upcomingTrains = [];
   bool _isLoadingTrains = false;
   DateTime? _lastScheduleRefresh;
   String? _watchedTrainId;
+  DateTime? _watchStartedAt;
   Timer? _schedulePollTimer;
   bool _isAppFocused = true;
   int _pollCountdownSeconds = 5;
   bool _isPollInFlight = false;
+  bool _isFastTrackPolling = false;
+  bool _isFastTrackPollInFlight = false;
+  DateTime? _fastTrackBurstStartedAt;
+  DateTime? _trackWatchRateLimitUntil;
+  int _fastTrackFullSyncCounter = 0;
   int _refreshGeneration = 0;
   final Set<String> _simulatedTrackTrainIds = {};
 
@@ -114,6 +195,7 @@ class AppState extends ChangeNotifier {
   DateTime _lastRideUpdateDateTime = DateTime.now();
   StreamSubscription<Position>? _gpsSubscription;
   Timer? _simulationTimer;
+  Timer? _postArrivalGuardStopTimer;
   bool _isAutoSimulating = false;
   final Set<int> _notifiedStopIndices = {};
   bool _hasFiredWakeUpAlarm = false;
@@ -189,10 +271,16 @@ class AppState extends ChangeNotifier {
   bool get isLoadingTrains => _isLoadingTrains;
   DateTime? get lastScheduleRefresh => _lastScheduleRefresh;
   String? get watchedTrainId => _watchedTrainId;
+  TrainTrip? get watchedTrain => _watchedTrainId == null
+      ? null
+      : _upcomingTrains.where((t) => t.trainId == _watchedTrainId).firstOrNull;
   bool get isAppFocused => _isAppFocused;
   int get pollCountdownSeconds => _pollCountdownSeconds;
+  bool get isFastTrackPolling => _isFastTrackPolling;
   bool get isPollingActive =>
       _isAppFocused || _watchedTrainId != null || _activeRideTrain != null;
+  bool get isBackgroundGuardActive =>
+      _activeRideTrain != null || _watchedTrainId != null;
 
   TrainTrip? get activeRideTrain => _activeRideTrain;
   DateTime? get activeRideArrivalEastern => _activeRideArrivalEastern;
@@ -240,6 +328,7 @@ class AppState extends ChangeNotifier {
     await Hive.initFlutter();
     _settingsBox = await Hive.openBox('my5top_settings');
     await _loadFromBox();
+    await syncFromBackgroundGuard();
     _initialized = true;
     notifyListeners();
 
@@ -247,8 +336,10 @@ class AppState extends ChangeNotifier {
     if (_activeRideTrain != null) {
       await _startGpsStream();
       await _updateOngoingNotification();
+      await _syncBackgroundGuard();
     } else {
       await NotificationService.cancelRideProgress();
+      await NotificationService.stopBackgroundGuard();
     }
     await refreshSchedules();
     _startPeriodicSchedulePoll();
@@ -443,8 +534,54 @@ class AppState extends ChangeNotifier {
     _schedulePollTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       // Guardrail: Only poll when app is open & focused, OR user has an active Track Watch, OR user confirmed they're on a train.
       if (!isPollingActive) {
+        if (_isFastTrackPolling) {
+          _isFastTrackPolling = false;
+          notifyListeners();
+        }
         return;
       }
+
+      final nowEast = NjtApiService.easternNow();
+      final watched = watchedTrain;
+      final shouldFastPoll = shouldUseFastTrackWatchPolling(
+        watchedTrip: watched,
+        nowEastern: nowEast,
+        fastBurstStartedAt: _fastTrackBurstStartedAt,
+        rateLimitBackoffUntil: _trackWatchRateLimitUntil,
+      );
+
+      if (shouldFastPoll) {
+        final wasFast = _isFastTrackPolling;
+        _isFastTrackPolling = true;
+        _fastTrackBurstStartedAt ??= nowEast;
+        _pollCountdownSeconds = 1;
+        _fastTrackFullSyncCounter++;
+
+        if (!_isFastTrackPollInFlight && !_isPollInFlight) {
+          _pollWatchedTrackFast();
+        }
+        if (_activeRideTrain != null &&
+            _fastTrackFullSyncCounter >= 10 &&
+            !_isPollInFlight) {
+          _fastTrackFullSyncCounter = 0;
+          refreshSchedules(silent: true);
+        }
+        if (!wasFast) {
+          _syncBackgroundGuard();
+        }
+        notifyListeners();
+        return;
+      }
+
+      if (_isFastTrackPolling) {
+        _isFastTrackPolling = false;
+        _fastTrackFullSyncCounter = 0;
+        if (watched == null || watched.hasTrack) {
+          _fastTrackBurstStartedAt = null;
+        }
+        _syncBackgroundGuard();
+      }
+
       if (_isPollInFlight) return;
 
       if (_pollCountdownSeconds > 1) {
@@ -457,13 +594,116 @@ class AppState extends ChangeNotifier {
     });
   }
 
+  Future<void> _pollWatchedTrackFast() async {
+    final targetId = _watchedTrainId;
+    if (targetId == null || _isFastTrackPollInFlight) return;
+
+    final reqOrigin = _originStationCode;
+    final reqDest = _destinationStationCode;
+    _isFastTrackPollInFlight = true;
+
+    try {
+      final res = await NjtApiService.pollSingleTrainTrackFast(
+        originCode: reqOrigin,
+        trainId: targetId,
+      );
+      if (res == null ||
+          _watchedTrainId != targetId ||
+          _originStationCode != reqOrigin ||
+          _destinationStationCode != reqDest) {
+        return;
+      }
+
+      if (res.rateLimited) {
+        _trackWatchRateLimitUntil =
+            res.fetchedAtEastern.add(const Duration(seconds: 30));
+        _isFastTrackPolling = false;
+        notifyListeners();
+        return;
+      }
+
+      if (!res.foundOnBoard) return;
+
+      final idx = _upcomingTrains.indexWhere(
+        (t) =>
+            t.trainId == targetId &&
+            t.originCode == reqOrigin &&
+            t.destinationCode == reqDest,
+      );
+      if (idx == -1) return;
+
+      final prev = _upcomingTrains[idx];
+      final updated = prev.copyWith(
+        track: res.hasTrack ? res.track : prev.track,
+        status: res.status.isNotEmpty ? res.status : prev.status,
+      );
+      _upcomingTrains[idx] = updated;
+      _lastScheduleRefresh = DateTime.now();
+
+      final statusUpper = updated.status.toUpperCase();
+      if (statusUpper.contains('CANCEL')) {
+        _clearWatchedTrain(notify: false);
+        await NotificationService.showCommuteAlert(
+          type: 'track',
+          title: '⚠️ Train #$targetId Cancelled',
+          body:
+              'DepartureVision marked Train #$targetId as Cancelled at ${originStation.shortName}.',
+          vibrate: _notificationRules.vibrateOnAlerts,
+          headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
+        );
+        await _syncBackgroundGuard();
+        notifyListeners();
+        return;
+      }
+
+      if (_activeRideTrain == null && statusUpper.contains('DEPART')) {
+        _clearWatchedTrain(notify: false);
+        await NotificationService.showCommuteAlert(
+          type: 'info',
+          title: '🚉 Train #$targetId Departed ${originStation.shortName}',
+          body:
+              'Track watch paused automatically since Train #$targetId has departed.',
+          vibrate: false,
+          headphoneAudioBypass: false,
+        );
+        await _syncBackgroundGuard();
+        notifyListeners();
+        return;
+      }
+
+      if (updated.hasTrack && !prev.hasTrack) {
+        _clearWatchedTrain(notify: false);
+        await _fireTrackAnnouncedAlert(updated);
+        await _syncBackgroundGuard();
+      }
+      notifyListeners();
+    } finally {
+      _isFastTrackPollInFlight = false;
+    }
+  }
+
+  void _clearWatchedTrain({bool notify = true}) {
+    _watchedTrainId = null;
+    _watchStartedAt = null;
+    _isFastTrackPolling = false;
+    _fastTrackBurstStartedAt = null;
+    _fastTrackFullSyncCounter = 0;
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
   void setAppFocused(bool focused) {
     if (_isAppFocused == focused) return;
     _isAppFocused = focused;
     if (focused) {
       _pollCountdownSeconds = 5;
+      syncFromBackgroundGuard();
       refreshSchedules(silent: true);
     } else {
+      if (isBackgroundGuardActive) {
+        _syncBackgroundGuard();
+      }
       notifyListeners();
     }
   }
@@ -484,6 +724,9 @@ class AppState extends ChangeNotifier {
     _notificationRules = _notificationRules.copyWith(mascotPersonality: style);
     await _saveNotificationRules();
     notifyListeners();
+    if (isBackgroundGuardActive) {
+      await _syncBackgroundGuard();
+    }
   }
 
   Future<void> setDarkMode(bool val) async {
@@ -512,7 +755,7 @@ class AppState extends ChangeNotifier {
     _originStationCode = origCode;
     _destinationStationCode = destCode;
     if (routeChanged) {
-      _watchedTrainId = null;
+      _clearWatchedTrain(notify: false);
       _simulatedTrackTrainIds.clear();
       // Immediately replace old-direction trains with real cached bidirectional
       // NEC trains for the new direction (or empty while polling) — never invert!
@@ -522,6 +765,7 @@ class AppState extends ChangeNotifier {
             activeRideTrainId: _activeRideTrain?.trainId,
           ) ??
           [];
+      await _syncBackgroundGuard();
     }
     await _settingsBox.put('origin_station_code', origCode);
     await _settingsBox.put('destination_station_code', destCode);
@@ -579,7 +823,10 @@ class AppState extends ChangeNotifier {
     await _saveNotificationRules();
     notifyListeners();
     if (isRiding) {
-      _updateOngoingNotification();
+      await _updateOngoingNotification();
+    }
+    if (isBackgroundGuardActive) {
+      await _syncBackgroundGuard();
     }
   }
 
@@ -721,17 +968,24 @@ class AppState extends ChangeNotifier {
           if (_activeRideTrain == null &&
               watchedNow.hasDepartedOrigin(NjtApiService.easternNow())) {
             final departedId = watchedNow.trainId;
-            _watchedTrainId = null;
+            _clearWatchedTrain(notify: false);
             NotificationService.showCommuteAlert(
               type: 'info',
               title: '🚉 Train #$departedId Departed ${originStation.shortName}',
               body:
                   'Track watch paused automatically since Train #$departedId has departed. If you boarded it, tap "I\'m on this!" under Just Departed.',
               vibrate: false,
+              headphoneAudioBypass: false,
             );
+            _syncBackgroundGuard();
           } else if (watchedNow.hasTrack &&
               (watchedPrev == null || !watchedPrev.hasTrack)) {
+            _clearWatchedTrain(notify: false);
             _fireTrackAnnouncedAlert(watchedNow);
+            _syncBackgroundGuard();
+          } else if (watchedPrev == null ||
+              watchedPrev.status != watchedNow.status) {
+            _syncBackgroundGuard();
           }
         }
       }
@@ -777,23 +1031,31 @@ class AppState extends ChangeNotifier {
   // --- Track Watcher ---
   void toggleWatchTrainTrack(TrainTrip trip) {
     if (_watchedTrainId == trip.trainId) {
-      _watchedTrainId = null;
-      notifyListeners();
+      _clearWatchedTrain();
+      _syncBackgroundGuard();
       return;
     }
     _watchedTrainId = trip.trainId;
+    _watchStartedAt = DateTime.now();
+    _fastTrackBurstStartedAt = null;
+    _isFastTrackPolling = false;
+    _fastTrackFullSyncCounter = 0;
     notifyListeners();
 
     if (trip.hasTrack && _notificationRules.notifyOnTrackAssigned) {
       _fireTrackAnnouncedAlert(trip);
+      _clearWatchedTrain();
+      _syncBackgroundGuard();
     } else {
       NotificationService.showCommuteAlert(
         type: 'info',
         title: '👀 Watching Train #${trip.trainId} for Track',
         body:
-            'We\'ll alert you the moment DepartureVision posts the track at ${originStation.shortName}!',
+            '1s fast polling engages at the 11-min mark so you\'re alerted the instant ${originStation.shortName} posts the track!',
         vibrate: false,
+        headphoneAudioBypass: false,
       );
+      _syncBackgroundGuard();
     }
   }
 
@@ -814,8 +1076,12 @@ class AppState extends ChangeNotifier {
         status: 'Boarding',
       );
     }
+    if (_watchedTrainId == trainId) {
+      _clearWatchedTrain(notify: false);
+    }
     notifyListeners();
     await _fireTrackAnnouncedAlert(updated);
+    await _syncBackgroundGuard();
   }
 
   Future<void> _fireTrackAnnouncedAlert(TrainTrip trip) async {
@@ -830,6 +1096,7 @@ class AppState extends ChangeNotifier {
       title: title,
       body: body,
       vibrate: _notificationRules.vibrateOnAlerts,
+      headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
     );
   }
 
@@ -873,13 +1140,15 @@ class AppState extends ChangeNotifier {
 
   Future<void> startRide(TrainTrip trip) async {
     stopAutoSimulate();
+    _postArrivalGuardStopTimer?.cancel();
+    _postArrivalGuardStopTimer = null;
     final rng = math.Random();
     _activeRideTrain = trip;
     _activeRideBoardedAt = DateTime.now();
     _activeRideArrivalEastern = computeTripArrivalEastern(trip);
     _rideSceneSeed = rng.nextInt(1 << 20);
     _rideVariationIndex = rng.nextInt(5);
-    _watchedTrainId = null;
+    _clearWatchedTrain(notify: false);
 
     final stops = activeCommuteStops;
     int initialStopIdx = 0;
@@ -914,17 +1183,18 @@ class AppState extends ChangeNotifier {
     await _saveActiveRideToBox();
     notifyListeners();
     await _startGpsStream();
-    await _updateOngoingNotification();
+    await _syncBackgroundGuard();
 
     final isSakura = _animeThemeStyle == 'sakura';
+    final destShort = getStationByCode(trip.destinationCode).shortName;
     await NotificationService.showCommuteAlert(
       type: 'stop',
-      title:
-          '🚆 Boarded Train #${trip.trainId} → ${destinationStation.shortName}',
+      title: '🚆 Boarded Train #${trip.trainId} → $destShort',
       body: isSakura
-          ? '♪ All aboard! $stopsRemaining stops to ${destinationStation.shortName} (ETA ${trip.arrivalTime}). Alerting at ${_notificationRules.startNotifyingStopsAway} stops away~'
-          : '✦ Confirmed on Train #${trip.trainId} (${trip.track != null ? "Track ${trip.track}" : "NEC"}). $stopsRemaining stops to ${destinationStation.shortName} • ETA ${trip.arrivalTime}.',
+          ? '♪ All aboard! $stopsRemaining stops to $destShort (ETA ${trip.arrivalTime}). Silent Guard active & alerting at ${_notificationRules.startNotifyingStopsAway} stops away~'
+          : '✦ Confirmed on Train #${trip.trainId} (${trip.track != null ? "Track ${trip.track}" : "NEC"}). $stopsRemaining stops to $destShort • ETA ${trip.arrivalTime}. Silent Guard ON.',
       vibrate: _notificationRules.vibrateOnAlerts,
+      headphoneAudioBypass: false,
     );
   }
 
@@ -997,9 +1267,12 @@ class AppState extends ChangeNotifier {
         _distanceToDestinationMeters! <= 950 &&
         stopsRemaining <= 1) {
       _hasFiredWakeUpAlarm = true;
+      final destShort =
+          getStationByCode(_activeRideTrain!.destinationCode).shortName;
       _fireArrivalWakeUpAlert(
-        reason: 'Within ${_distanceToDestinationMeters!.toInt()}m of ${destinationStation.shortName}',
+        reason: 'Within ${_distanceToDestinationMeters!.toInt()}m of $destShort',
       );
+      _syncBackgroundGuard();
     }
 
     _saveActiveRideToBox();
@@ -1007,6 +1280,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _syncActiveRideFromApi(TrainTrip freshTrip) {
+    final prevTrip = _activeRideTrain!;
     final freshStops = freshTrip.commuteStops;
     int highestDepartedIdx = _currentStopIndex;
     for (int i = 0; i < freshStops.length; i++) {
@@ -1014,13 +1288,11 @@ class AppState extends ChangeNotifier {
         highestDepartedIdx = i;
       }
     }
-    _activeRideTrain = _activeRideTrain!.copyWith(
+    _activeRideTrain = prevTrip.copyWith(
       status: freshTrip.status,
-      track: freshTrip.track ?? _activeRideTrain!.track,
+      track: freshTrip.track ?? prevTrip.track,
       arrivalTime: freshTrip.arrivalTime,
-      stops: freshTrip.stops.isNotEmpty
-          ? freshTrip.stops
-          : _activeRideTrain!.stops,
+      stops: freshTrip.stops.isNotEmpty ? freshTrip.stops : prevTrip.stops,
     );
     _activeRideArrivalEastern = computeTripArrivalEastern(
       _activeRideTrain!,
@@ -1031,6 +1303,11 @@ class AppState extends ChangeNotifier {
       _advanceToStopIndex(highestDepartedIdx, source: 'NJT Live API Feed');
     } else {
       _saveActiveRideToBox();
+      if (_activeRideTrain!.track != prevTrip.track ||
+          _activeRideTrain!.status != prevTrip.status ||
+          _activeRideTrain!.arrivalTime != prevTrip.arrivalTime) {
+        _syncBackgroundGuard();
+      }
     }
   }
 
@@ -1060,9 +1337,20 @@ class AppState extends ChangeNotifier {
     }
 
     notifyListeners();
-    await _updateOngoingNotification();
     await _evaluateStopNotifications(clamped, source: source);
     await _saveActiveRideToBox();
+    await _syncBackgroundGuard();
+
+    // Battery-safe auto-cutoff: 2 minutes after reaching the desired stop, shut down background guard
+    if (stopsRemaining == 0) {
+      _postArrivalGuardStopTimer?.cancel();
+      _postArrivalGuardStopTimer = Timer(postArrivalGuardGracePeriod, () async {
+        if (_activeRideTrain != null && stopsRemaining == 0) {
+          await NotificationService.stopBackgroundGuard();
+          await NotificationService.cancelRideProgress();
+        }
+      });
+    }
   }
 
   Future<void> _evaluateStopNotifications(int stopIdx, {required String source}) async {
@@ -1074,13 +1362,16 @@ class AppState extends ChangeNotifier {
     final currentStop = stops[stopIdx];
     final rem = stopsRemaining;
     final isSakura = _animeThemeStyle == 'sakura';
+    final destShort = _activeRideTrain != null
+        ? getStationByCode(_activeRideTrain!.destinationCode).shortName
+        : destinationStation.shortName;
 
     // Case 1: Arrived at destination (0 stops remaining)
     if (rem == 0) {
       if (!_hasFiredWakeUpAlarm) {
         _hasFiredWakeUpAlarm = true;
         await _fireArrivalWakeUpAlert(
-          reason: 'Arrived at ${destinationStation.shortName}!',
+          reason: 'Arrived at $destShort!',
         );
       }
       return;
@@ -1090,21 +1381,22 @@ class AppState extends ChangeNotifier {
     if (rem <= _notificationRules.startNotifyingStopsAway) {
       final isOneStopAway = rem == 1;
       final title = isOneStopAway
-          ? '🚨 1 STOP AWAY! Next: ${destinationStation.shortName}'
-          : '🔔 $rem Stops Away from ${destinationStation.shortName}!';
+          ? '🚨 1 STOP AWAY! Next: $destShort'
+          : '🔔 $rem Stops Away from $destShort!';
       final body = isOneStopAway
           ? (isSakura
-              ? '★ Passing ${currentStop.stationName}! ${destinationStation.shortName} is NEXT (ETA ${_activeRideTrain?.arrivalTime})! Pack up & head to the doors~ ♪'
-              : '⚡ Passed ${currentStop.stationName}. ${destinationStation.shortName} is the NEXT stop (ETA ${_activeRideTrain?.arrivalTime}). Time to stand up!')
+              ? '★ Passing ${currentStop.stationName}! $destShort is NEXT (ETA ${_activeRideTrain?.arrivalTime})! Pack up & head to the doors~ ♪'
+              : '⚡ Passed ${currentStop.stationName}. $destShort is the NEXT stop (ETA ${_activeRideTrain?.arrivalTime}). Time to stand up!')
           : (isSakura
-              ? '✿ Now at ${currentStop.stationName} • Only $rem stops left until ${destinationStation.shortName} (ETA ${_activeRideTrain?.arrivalTime})~!'
-              : '✦ Cleared ${currentStop.stationName} ($source). $rem stops left to ${destinationStation.shortName} • ETA ${_activeRideTrain?.arrivalTime}.');
+              ? '✿ Now at ${currentStop.stationName} • Only $rem stops left until $destShort (ETA ${_activeRideTrain?.arrivalTime})~!'
+              : '✦ Cleared ${currentStop.stationName} ($source). $rem stops left to $destShort • ETA ${_activeRideTrain?.arrivalTime}.');
 
       await NotificationService.showCommuteAlert(
         type: isOneStopAway ? 'arrival' : 'stop',
         title: title,
         body: body,
         vibrate: _notificationRules.vibrateOnAlerts,
+        headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
       );
       return;
     }
@@ -1115,51 +1407,235 @@ class AppState extends ChangeNotifier {
         type: 'stop',
         title: '🚉 Passed ${currentStop.stationName} ($rem stops left)',
         body:
-            'Next stop: ${nextUpcomingStop?.stationName ?? destinationStation.shortName} • Destination ETA: ${_activeRideTrain?.arrivalTime}',
+            'Next stop: ${nextUpcomingStop?.stationName ?? destShort} • Destination ETA: ${_activeRideTrain?.arrivalTime}',
         vibrate: _notificationRules.vibrateOnAlerts,
+        headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
       );
     }
   }
 
   Future<void> _fireArrivalWakeUpAlert({required String reason}) async {
     final isSakura = _animeThemeStyle == 'sakura';
+    final destShort = _activeRideTrain != null
+        ? getStationByCode(_activeRideTrain!.destinationCode).shortName
+        : destinationStation.shortName;
     await NotificationService.showCommuteAlert(
       type: 'arrival',
-      title: '🎉 ARRIVING AT ${destinationStation.shortName.toUpperCase()}!',
+      title: '🎉 ARRIVING AT ${destShort.toUpperCase()}!',
       body: isSakura
           ? '★ $reason! Check your seat for your phone, headphones & bag before stepping off~ ♪'
           : '⚡ $reason! Grab your bag and step onto the platform safely.',
       vibrate: true,
+      headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
     );
   }
 
   Future<void> _updateOngoingNotification() async {
-    final trip = _activeRideTrain;
-    if (trip == null) {
-      await NotificationService.cancelRideProgress();
+    await _syncBackgroundGuard();
+  }
+
+  /// Synchronizes the native Android Foreground Service ("Silent Guard") with
+  /// the active ride or active track watch so notifications survive accidental
+  /// app closing and automatically cut off after arrival or safety caps.
+  Future<void> _syncBackgroundGuard() async {
+    final rideTrip = _activeRideTrain;
+    if (rideTrip != null) {
+      final origSt = getStationByCode(rideTrip.originCode);
+      final destSt = getStationByCode(rideTrip.destinationCode);
+      final stops = activeCommuteStops;
+      final rem = stopsRemaining;
+      final currName = currentOrLastPassedStop?.stationName ?? origSt.shortName;
+      final nextName = nextUpcomingStop?.stationName ?? destSt.shortName;
+      final arrivalEast = _activeRideArrivalEastern ??
+          computeTripArrivalEastern(rideTrip);
+      final depEast = rideTrip.departureDateTime;
+
+      final notifTitle = rem == 0
+          ? 'Arrived at ${destSt.shortName}! • Train #${rideTrip.trainId}'
+          : 'Train #${rideTrip.trainId} → ${destSt.shortName} ($rem ${rem == 1 ? "stop" : "stops"} away)';
+      final notifBody = rem == 0
+          ? 'Commute complete! Auto-stopping soon to save battery.'
+          : 'At/Passed: $currName • Next: $nextName • ETA ${rideTrip.arrivalTime}';
+      final notifSubText = rideTrip.track != null
+          ? 'Track ${rideTrip.track} • Guard ON'
+          : 'my5top Guard';
+
+      final payload = <String, dynamic>{
+        'mode': 'ride',
+        'trainId': rideTrip.trainId,
+        'originCode': origSt.code,
+        'originDvCode': origSt.dvCode,
+        'originShortName': origSt.shortName,
+        'destCode': destSt.code,
+        'destShortName': destSt.shortName,
+        'departureTime': rideTrip.departureTime,
+        'arrivalTime': rideTrip.arrivalTime,
+        'departureEpochMs': depEast != null
+            ? NjtApiService.easternWallClockToEpochMs(depEast)
+            : 0,
+        'arrivalEpochMs': NjtApiService.easternWallClockToEpochMs(arrivalEast),
+        'startedAtEpochMs':
+            (_activeRideBoardedAt ?? DateTime.now()).millisecondsSinceEpoch,
+        'track': rideTrip.track ?? '',
+        'status': rideTrip.status,
+        'currentStopIndex': _currentStopIndex,
+        'notifiedStopIndices': _notifiedStopIndices.toList(),
+        'hasFiredWakeUpAlarm': _hasFiredWakeUpAlarm,
+        'stops': stops
+            .map((s) => {
+                  'stationCode': s.stationCode,
+                  'stationName': s.stationName,
+                  'latitude': s.latitude,
+                  'longitude': s.longitude,
+                  'estimatedTime': s.estimatedTime,
+                })
+            .toList(),
+        'rules': _notificationRules.toJson(),
+        'notificationTitle': notifTitle,
+        'notificationBody': notifBody,
+        'notificationSubText': notifSubText,
+      };
+      await NotificationService.startBackgroundGuard(payload);
       return;
     }
-    final stops = activeCommuteStops;
-    final total = stops.length > 1 ? stops.length - 1 : 1;
-    final passed = _currentStopIndex.clamp(0, total);
-    final rem = stopsRemaining;
-    final currName = currentOrLastPassedStop?.stationName ?? originStation.shortName;
-    final nextName = nextUpcomingStop?.stationName ?? destinationStation.shortName;
 
-    final title = rem == 0
-        ? 'Arrived at ${destinationStation.shortName}! • Train #${trip.trainId}'
-        : 'Train #${trip.trainId} → ${destinationStation.shortName} ($rem ${rem == 1 ? "stop" : "stops"} away)';
-    final body = rem == 0
-        ? 'Commute complete! Don\'t forget your belongings.'
-        : 'At/Passed: $currName • Next: $nextName • ETA ${trip.arrivalTime}';
+    final watched = watchedTrain;
+    if (watched != null && !watched.hasTrack) {
+      final origSt = getStationByCode(watched.originCode);
+      final destSt = getStationByCode(watched.destinationCode);
+      final depEast = watched.departureDateTime;
+      final notifTitle =
+          '👀 Watching Track • Train #${watched.trainId} (${watched.departureTime})';
+      final notifBody = _isFastTrackPolling
+          ? '1s fast polling active for ${origSt.shortName} track drop • ${watched.status}'
+          : 'Waiting for ${origSt.shortName} track assignment • ${watched.status}';
+      final notifSubText =
+          _isFastTrackPolling ? '⚡ 1s Watch' : 'Track Watch';
 
-    await NotificationService.updateRideProgress(
-      title: title,
-      body: body,
-      subText: trip.track != null ? 'Track ${trip.track}' : 'my5top Live',
-      passedStops: passed,
-      totalStops: total,
-    );
+      final payload = <String, dynamic>{
+        'mode': 'watch',
+        'trainId': watched.trainId,
+        'originCode': origSt.code,
+        'originDvCode': origSt.dvCode,
+        'originShortName': origSt.shortName,
+        'destCode': destSt.code,
+        'destShortName': destSt.shortName,
+        'departureTime': watched.departureTime,
+        'arrivalTime': watched.arrivalTime,
+        'departureEpochMs': depEast != null
+            ? NjtApiService.easternWallClockToEpochMs(depEast)
+            : 0,
+        'arrivalEpochMs': 0,
+        'startedAtEpochMs':
+            (_watchStartedAt ?? DateTime.now()).millisecondsSinceEpoch,
+        'track': watched.track ?? '',
+        'status': watched.status,
+        'currentStopIndex': 0,
+        'notifiedStopIndices': <int>[],
+        'hasFiredWakeUpAlarm': false,
+        'stops': <Map<String, dynamic>>[],
+        'rules': _notificationRules.toJson(),
+        'notificationTitle': notifTitle,
+        'notificationBody': notifBody,
+        'notificationSubText': notifSubText,
+      };
+      await NotificationService.startBackgroundGuard(payload);
+      return;
+    }
+
+    await NotificationService.stopBackgroundGuard();
+    await NotificationService.cancelRideProgress();
+  }
+
+  /// Pulls any progress, track announcements, or 1-tap notification stop events
+  /// recorded by the native Android Foreground Service while the UI was closed.
+  Future<void> syncFromBackgroundGuard() async {
+    final updates = await NotificationService.syncBackgroundState();
+    if (updates == null || updates['hasUpdates'] != true) return;
+
+    final bgMode = (updates['mode'] ?? '').toString();
+    final bgTrainId = (updates['trainId'] ?? '').toString();
+    final stoppedByUser = updates['stoppedByUser'] == true;
+
+    if (stoppedByUser) {
+      if (bgMode == 'ride' && _activeRideTrain != null) {
+        await completeOrCancelRide(saveToHistory: true);
+      } else if (bgMode == 'watch' && _watchedTrainId != null) {
+        _clearWatchedTrain();
+      }
+      return;
+    }
+
+    if (bgMode == 'ride' &&
+        _activeRideTrain != null &&
+        _activeRideTrain!.trainId == bgTrainId) {
+      bool changed = false;
+      final bgStopIdx = (updates['currentStopIndex'] as num?)?.toInt() ?? -1;
+      final stops = activeCommuteStops;
+      if (stops.isNotEmpty && bgStopIdx > _currentStopIndex) {
+        _currentStopIndex = bgStopIdx.clamp(0, stops.length - 1);
+        final currSt = stops[_currentStopIndex];
+        final destSt = stops.last;
+        _distanceToDestinationMeters = getStationByCode(currSt.stationCode)
+            .distanceMetersTo(destSt.latitude, destSt.longitude);
+        if (_currentStopIndex < stops.length - 1) {
+          final nextSt = stops[_currentStopIndex + 1];
+          _distanceToNextStopMeters = getStationByCode(currSt.stationCode)
+              .distanceMetersTo(nextSt.latitude, nextSt.longitude);
+          _segmentProgress = 0.0;
+        } else {
+          _distanceToNextStopMeters = 0;
+          _segmentProgress = 1.0;
+        }
+        changed = true;
+      }
+
+      final bgNotified = updates['notifiedStopIndices'];
+      if (bgNotified is List) {
+        for (final item in bgNotified) {
+          if (item is num) {
+            if (_notifiedStopIndices.add(item.toInt())) {
+              changed = true;
+            }
+          }
+        }
+      }
+
+      if (updates['hasFiredWakeUpAlarm'] == true && !_hasFiredWakeUpAlarm) {
+        _hasFiredWakeUpAlarm = true;
+        changed = true;
+      }
+
+      final bgSource = (updates['lastTrackingSignalSource'] ?? '').toString().trim();
+      if (bgSource.isNotEmpty && bgSource != _lastTrackingSignalSource) {
+        _lastTrackingSignalSource = bgSource;
+        changed = true;
+      }
+
+      if (changed) {
+        _lastRideUpdateDateTime = DateTime.now();
+        await _saveActiveRideToBox();
+        notifyListeners();
+      }
+    } else if (bgMode == 'watch' && bgTrainId.isNotEmpty) {
+      final detectedTrack = (updates['detectedTrack'] ?? '').toString().trim();
+      final detectedStatus = (updates['detectedStatus'] ?? '').toString().trim();
+      if (detectedTrack.isNotEmpty) {
+        final idx = _upcomingTrains.indexWhere((t) => t.trainId == bgTrainId);
+        if (idx != -1) {
+          _upcomingTrains[idx] = _upcomingTrains[idx].copyWith(
+            track: detectedTrack,
+            status: detectedStatus.isNotEmpty
+                ? detectedStatus
+                : _upcomingTrains[idx].status,
+          );
+        }
+        if (_watchedTrainId == bgTrainId) {
+          _clearWatchedTrain(notify: false);
+        }
+        notifyListeners();
+      }
+    }
   }
 
   // --- Interactive Commute Simulator (Step through stops or auto-run) ---
@@ -1208,9 +1684,10 @@ class AppState extends ChangeNotifier {
 
   Future<void> completeOrCancelRide({bool saveToHistory = true}) async {
     stopAutoSimulate();
+    _postArrivalGuardStopTimer?.cancel();
+    _postArrivalGuardStopTimer = null;
     await _gpsSubscription?.cancel();
     _gpsSubscription = null;
-    await NotificationService.cancelRideProgress();
 
     final trip = _activeRideTrain;
     if (trip != null && saveToHistory) {
@@ -1246,7 +1723,17 @@ class AppState extends ChangeNotifier {
     _currentStopIndex = 0;
     _segmentProgress = 0.0;
     await _settingsBox.delete('active_ride_state');
+    await _syncBackgroundGuard();
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _schedulePollTimer?.cancel();
+    _simulationTimer?.cancel();
+    _postArrivalGuardStopTimer?.cancel();
+    _gpsSubscription?.cancel();
+    super.dispose();
   }
 
   // --- MIHON-STYLE SAF / GOOGLE DRIVE JSON BACKUP & RESTORE ---

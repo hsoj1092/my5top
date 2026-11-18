@@ -60,6 +60,28 @@ class _LiveCorridorSnapshot {
   });
 }
 
+class TrackWatchPollResult {
+  final String trainId;
+  final String? track;
+  final String status;
+  final String inlineMessage;
+  final bool foundOnBoard;
+  final bool rateLimited;
+  final DateTime fetchedAtEastern;
+
+  const TrackWatchPollResult({
+    required this.trainId,
+    required this.track,
+    required this.status,
+    required this.inlineMessage,
+    required this.foundOnBoard,
+    this.rateLimited = false,
+    required this.fetchedAtEastern,
+  });
+
+  bool get hasTrack => track != null && track!.trim().isNotEmpty;
+}
+
 class NjtApiService {
   static const String _graphQlUrl =
       'https://www.njtransit.com/api/graphql/graphql';
@@ -140,6 +162,40 @@ class NjtApiService {
       shifted.minute,
       shifted.second,
     );
+  }
+
+  /// Converts an Eastern wall-clock [DateTime] (as returned by [easternNow] or
+  /// [parseNjtTime]) into an exact UTC Unix timestamp in milliseconds.
+  static int easternWallClockToEpochMs(DateTime easternWallClock) {
+    final year = easternWallClock.year;
+    final march1Weekday = DateTime.utc(year, 3, 1).weekday;
+    final secondSundayMarch = 8 + ((7 - march1Weekday) % 7);
+    final dstStartUtc = DateTime.utc(year, 3, secondSundayMarch, 7, 0);
+
+    final nov1Weekday = DateTime.utc(year, 11, 1).weekday;
+    final firstSundayNov = 1 + ((7 - nov1Weekday) % 7);
+    final dstEndUtc = DateTime.utc(year, 11, firstSundayNov, 6, 0);
+
+    final candidateEdtUtc = DateTime.utc(
+      easternWallClock.year,
+      easternWallClock.month,
+      easternWallClock.day,
+      easternWallClock.hour + 4,
+      easternWallClock.minute,
+      easternWallClock.second,
+    );
+    if (!candidateEdtUtc.isBefore(dstStartUtc) &&
+        candidateEdtUtc.isBefore(dstEndUtc)) {
+      return candidateEdtUtc.millisecondsSinceEpoch;
+    }
+    return DateTime.utc(
+      easternWallClock.year,
+      easternWallClock.month,
+      easternWallClock.day,
+      easternWallClock.hour + 5,
+      easternWallClock.minute,
+      easternWallClock.second,
+    ).millisecondsSinceEpoch;
   }
 
   /// Parses NJ Transit 12-hour (`"11:37 AM"`) or ISO/timestamp strings into
@@ -648,6 +704,93 @@ class NjtApiService {
       );
     } catch (_) {
       return const [];
+    } finally {
+      if (shouldClose) client.close();
+    }
+  }
+
+  /// Ultra-lightweight single-station DepartureVision GraphQL query used during
+  /// the 1-second Track Watch burst window (11m–9m before departure, or extended
+  /// during delays/non-routine statuses). Queries only [originCode]'s board
+  /// without fetching stop lists, keeping payload & latency minimal.
+  static Future<TrackWatchPollResult?> pollSingleTrainTrackFast({
+    required String originCode,
+    required String trainId,
+    http.Client? httpClient,
+    DateTime? referenceNow,
+  }) async {
+    final orig = getStationByCode(originCode);
+    final dv = orig.dvCode.toUpperCase();
+    final targetId = trainId.trim();
+    if (targetId.isEmpty) return null;
+
+    final client = httpClient ?? http.Client();
+    final shouldClose = httpClient == null;
+    final nowEast = easternNow(referenceNow);
+
+    try {
+      final query =
+          'query { board: getTrainDepartureScreens(station: "$dv") { '
+          'items { trainID status track inlineMessage } '
+          '} }';
+
+      final resp = await client
+          .post(
+            Uri.parse(_graphQlUrl),
+            headers: const {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: json.encode({'query': query}),
+          )
+          .timeout(const Duration(seconds: 4));
+
+      if (resp.statusCode == 429 || resp.statusCode == 503) {
+        return TrackWatchPollResult(
+          trainId: targetId,
+          track: null,
+          status: '',
+          inlineMessage: '',
+          foundOnBoard: false,
+          rateLimited: true,
+          fetchedAtEastern: nowEast,
+        );
+      }
+      if (resp.statusCode != 200) return null;
+
+      final decoded = json.decode(resp.body);
+      if (decoded is! Map || decoded['data'] is! Map) return null;
+      final board = (decoded['data'] as Map)['board'];
+      if (board is! Map || board['items'] is! List) return null;
+
+      for (final rawItem in (board['items'] as List)) {
+        if (rawItem is! Map) continue;
+        final id = (rawItem['trainID'] ?? '').toString().trim();
+        if (id != targetId) continue;
+
+        final rawTrack = (rawItem['track'] ?? '').toString().trim();
+        final rawStatus = (rawItem['status'] ?? '').toString().trim();
+        final inlineMsg = (rawItem['inlineMessage'] ?? '').toString().trim();
+        return TrackWatchPollResult(
+          trainId: targetId,
+          track: rawTrack.isEmpty ? null : rawTrack,
+          status: normalizeStatusText(rawStatus, inlineMessage: inlineMsg),
+          inlineMessage: inlineMsg,
+          foundOnBoard: true,
+          fetchedAtEastern: nowEast,
+        );
+      }
+
+      return TrackWatchPollResult(
+        trainId: targetId,
+        track: null,
+        status: '',
+        inlineMessage: '',
+        foundOnBoard: false,
+        fetchedAtEastern: nowEast,
+      );
+    } catch (_) {
+      return null;
     } finally {
       if (shouldClose) client.close();
     }

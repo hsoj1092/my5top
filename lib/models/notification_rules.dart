@@ -5,6 +5,7 @@ class NotificationRules {
   final bool finalWakeUpAlarm;
   final double gpsStationRadiusMeters; // e.g., 550m geofence radius
   final bool vibrateOnAlerts;
+  final bool headphoneAudioBypass; // Play alert sound in headphones even when phone is on Vibrate/Silent
   final String mascotPersonality; // 'mygo' (cool/band), 'sakura' (genki conductor)
 
   const NotificationRules({
@@ -14,6 +15,7 @@ class NotificationRules {
     this.finalWakeUpAlarm = true,
     this.gpsStationRadiusMeters = 550.0,
     this.vibrateOnAlerts = true,
+    this.headphoneAudioBypass = true,
     this.mascotPersonality = 'mygo',
   });
 
@@ -24,6 +26,7 @@ class NotificationRules {
     bool? finalWakeUpAlarm,
     double? gpsStationRadiusMeters,
     bool? vibrateOnAlerts,
+    bool? headphoneAudioBypass,
     String? mascotPersonality,
   }) {
     return NotificationRules(
@@ -36,6 +39,7 @@ class NotificationRules {
       gpsStationRadiusMeters:
           gpsStationRadiusMeters ?? this.gpsStationRadiusMeters,
       vibrateOnAlerts: vibrateOnAlerts ?? this.vibrateOnAlerts,
+      headphoneAudioBypass: headphoneAudioBypass ?? this.headphoneAudioBypass,
       mascotPersonality: mascotPersonality ?? this.mascotPersonality,
     );
   }
@@ -47,6 +51,7 @@ class NotificationRules {
         'finalWakeUpAlarm': finalWakeUpAlarm,
         'gpsStationRadiusMeters': gpsStationRadiusMeters,
         'vibrateOnAlerts': vibrateOnAlerts,
+        'headphoneAudioBypass': headphoneAudioBypass,
         'mascotPersonality': mascotPersonality,
       };
 
@@ -60,6 +65,7 @@ class NotificationRules {
       gpsStationRadiusMeters:
           (json['gpsStationRadiusMeters'] as num?)?.toDouble() ?? 550.0,
       vibrateOnAlerts: json['vibrateOnAlerts'] != false,
+      headphoneAudioBypass: json['headphoneAudioBypass'] != false,
       mascotPersonality: (json['mascotPersonality'] ?? 'mygo').toString(),
     );
   }

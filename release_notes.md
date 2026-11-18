@@ -1,20 +1,18 @@
-# v1.0.4 — Streamlined Commuter Departure Board, Unified Route Bar & Collapsible En-Route View 🚆✨
+# v1.0.5 — 1-Second Track Watch Burst, Headphone Silent Bypass & Background Silent Guard 🚆🎧🛡️
 
-### ✨ What's New in v1.0.4
+### ✨ What's New in v1.0.5
 
-#### 🧭 Slim Unified Route & Quick-Alert Bar
-- **Unified Commute Header**: Combined the **To Home / To Work** segmented direction switcher, a single **`🔔 ≤X stops`** Quick Alert pill, and compact 2-line **Origin ⇄ Destination** station selectors into one clean card so upcoming departures appear immediately above the fold without scrolling.
-- **Calm Live Sync Indicator**: Replaced the ticking second-by-second sync string with a clean tap-to-refresh **`● Live • HH:MM`** status pill alongside the **Upcoming** header.
+#### ⚡ 1-Second Track Watch Fast Polling Burst
+- **11-Minute Precision Window**: Watched trains automatically switch to a lightweight **1-second single-station DepartureVision poll** starting at the **11-minute mark** before scheduled departure so you get your track number the instant it posts.
+- **Smart 9-Minute Guardrail & Delay Exception**: Standard on-time trains automatically step back down once the track posts or at the **9-minute mark**; delayed or non-routine trains extend fast polling past 9 minutes with an 8-minute continuous burst cap and automatic HTTP 429/503 backoff.
+- **Live Burst Indicators**: Displays a highlighted **`⚡ 1s Track Watch`** header pill and **`⚡ 1s Watch`** card badge whenever the 1-second track watcher is active.
 
-#### 🎀 Compact Mascot Companion Strip
-- **Single-Row Home Companion**: Condensed the main screen's animated conductor banner into a sleek single-row companion strip featuring the animated mascot avatar and live commute guidance, while preserving the full interactive mascot card during active rides.
-- **Streamlined Top Bar**: Simplified the top app bar to the **`my5top`** badge (with high-contrast dark and light palette styling), **Refresh**, and **Settings** controls.
+#### 🎧 Headphone-Only Sound Bypass on Silent / Vibrate
+- **Strict Headphone Routing**: When your phone is on **Vibrate**, **Silent**, or **Do Not Disturb**, commute alert chimes (track drops, stop countdowns, and arrival wake-up alarms) now play **strictly through connected wired, USB-C, or Bluetooth headphones**—never through phone speakers.
+- **Instant Disconnect Safeguard**: Automatically ducks background media while chiming and immediately halts playback on headphone disconnect (`ACTION_AUDIO_BECOMING_NOISY`) to prevent speaker bleed.
+- **Toggleable Control**: Enable or disable **Headphone sound on Silent/Vibrate** anytime from **Settings**, **Quick Commute Alert Settings**, or **Active Ride** notification controls.
 
-#### 🚆 Scannable 2-Row Departure Cards & Live Countdowns
-- **At-a-Glance Departure Countdowns**: Upcoming train cards now display relative departure chips (**`Now`**, **`in 8m`**, **`Boarding`**) directly beside **`Departure → Arrival`** times for instant platform decision-making.
-- **Clean 2-Row Card Hierarchy**: Replaced stacked badge borders with crisp plain-text trip metadata (**`#trainId • ⚡ Express • 38m • 3 stops`**), surfacing secondary status lines only when non-routine (delayed, cancelled, or en-route).
-- **Contextual Board Emphasis**: Highlighted the primary next upcoming train (and any active ride) with a solid accent **`Board`** button while keeping subsequent departures in a clean outlined style.
-
-#### 📂 Collapsible "Already on board?" En-Route Accordion
-- **1-Tap En-Route Expansion**: Recently departed en-route trains are now tucked neatly into a collapsible **`Already on board? • X trains`** (**`EN ROUTE`**) accordion at the bottom of the board—collapsed by default when upcoming trains are available and expandable with a single tap to check in mid-ride.
-- **Bottom Sheet Polish**: Added proper Material surface elevation and dynamic system navigation bar inset handling across train detail and quick alert settings sheets.
+#### 🛡️ Persistent Background Silent Guard (Survives Accidental Closing)
+- **Accidental-Close Protection**: Once a ride or track watch is active, pressing Back silently moves the app to the background instead of closing, and a native Android Foreground Service keeps tracking even if the app is swiped away from Recents—continuing to deliver stop, arrival, and track notifications until your commute completes.
+- **Seamless State Sync**: Any stops passed or tracks announced while running silently in the background automatically sync back into the app when reopened.
+- **Battery-Safe Automatic Cutoffs**: Automatically shuts down **2 minutes** after reaching your destination stop, **20 minutes** past scheduled arrival ETA, after a **3-hour** hard ride cap (or **45-minute** / **15m-past-departure** track watch cap), plus a 1-tap **End Ride** / **Stop Watch** action button right on the persistent notification.

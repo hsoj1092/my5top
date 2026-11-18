@@ -298,41 +298,72 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                             color: pal.scaffoldBg.withOpacity(0.55),
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Flexible(
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      Icons.sync_rounded,
-                                      size: 13,
-                                      color: pal.successColor,
-                                    ),
-                                    const SizedBox(width: 5),
-                                    Flexible(
-                                      child: Text(
-                                        'Updated: $lastUpdatedStamp (${appState.pollCountdownSeconds}s)',
-                                        style: TextStyle(
-                                          fontSize: 11.2,
-                                          fontWeight: FontWeight.w700,
-                                          color: pal.textSecondary,
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Flexible(
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.sync_rounded,
+                                          size: 13,
+                                          color: pal.successColor,
                                         ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
+                                        const SizedBox(width: 5),
+                                        Flexible(
+                                          child: Text(
+                                            'Updated: $lastUpdatedStamp (${appState.pollCountdownSeconds}s)',
+                                            style: TextStyle(
+                                              fontSize: 11.2,
+                                              fontWeight: FontWeight.w700,
+                                              color: pal.textSecondary,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                  ],
-                                ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Alert ≤ ${rules.startNotifyingStopsAway} ${rules.startNotifyingStopsAway == 1 ? "stop" : "stops"}',
+                                    style: TextStyle(
+                                      fontSize: 11.2,
+                                      fontWeight: FontWeight.w800,
+                                      color: pal.trackBadgeBg,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(width: 8),
-                              Text(
-                                'Alert ≤ ${rules.startNotifyingStopsAway} ${rules.startNotifyingStopsAway == 1 ? "stop" : "stops"}',
-                                style: TextStyle(
-                                  fontSize: 11.2,
-                                  fontWeight: FontWeight.w800,
-                                  color: pal.trackBadgeBg,
-                                ),
+                              const SizedBox(height: 6),
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.shield_rounded,
+                                    size: 13,
+                                    color: pal.primaryAccent,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Expanded(
+                                    child: Text(
+                                      rem == 0
+                                          ? 'Silent Guard: Arrived • Auto-stopping in 2m to save battery'
+                                          : 'Silent Guard ON • Runs safely in background until ${appState.destinationStation.shortName}',
+                                      style: TextStyle(
+                                        fontSize: 10.8,
+                                        fontWeight: FontWeight.w700,
+                                        color: pal.primaryAccent,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),
@@ -674,6 +705,33 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                     onChanged: (val) {
                                       appState.updateNotificationRules(
                                         rules.copyWith(finalWakeUpAlarm: val),
+                                      );
+                                    },
+                                  ),
+                                  SwitchListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    title: Text(
+                                      'Headphone sound on Silent/Vibrate',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: pal.textPrimary,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      'Play sound strictly in wired/Bluetooth headphones even on Silent/Vibrate (never speakers)',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: pal.textSecondary,
+                                      ),
+                                    ),
+                                    value: rules.headphoneAudioBypass,
+                                    activeColor: pal.primaryAccent,
+                                    onChanged: (val) {
+                                      appState.updateNotificationRules(
+                                        rules.copyWith(
+                                          headphoneAudioBypass: val,
+                                        ),
                                       );
                                     },
                                   ),

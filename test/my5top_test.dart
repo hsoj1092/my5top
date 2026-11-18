@@ -833,5 +833,214 @@ void main() {
 
       await tester.pumpWidget(const SizedBox.shrink());
     });
+
+    test('NotificationRules headphoneAudioBypass serializes and defaults safely',
+        () {
+      const defaults = NotificationRules();
+      expect(defaults.headphoneAudioBypass, isTrue);
+
+      final disabled = defaults.copyWith(headphoneAudioBypass: false);
+      final encoded = disabled.toJson();
+      expect(encoded['headphoneAudioBypass'], isFalse);
+
+      final roundTripped = NotificationRules.fromJson(encoded);
+      expect(roundTripped.headphoneAudioBypass, isFalse);
+
+      // Legacy backups missing the field should default to true
+      final legacy = NotificationRules.fromJson({
+        'notifyEveryStop': true,
+        'startNotifyingStopsAway': 3,
+      });
+      expect(legacy.headphoneAudioBypass, isTrue);
+    });
+
+    test('easternWallClockToEpochMs round-trips accurately across EST and EDT',
+        () {
+      // Winter (EST, UTC-5): Jan 15, 2026 08:30:00 Eastern -> 13:30:00 UTC
+      final winterWall = DateTime(2026, 1, 15, 8, 30, 0);
+      final winterEpochMs = NjtApiService.easternWallClockToEpochMs(winterWall);
+      final winterUtc =
+          DateTime.fromMillisecondsSinceEpoch(winterEpochMs, isUtc: true);
+      expect(winterUtc, equals(DateTime.utc(2026, 1, 15, 13, 30, 0)));
+
+      // Summer (EDT, UTC-4): Jul 15, 2026 17:45:00 Eastern -> 21:45:00 UTC
+      final summerWall = DateTime(2026, 7, 15, 17, 45, 0);
+      final summerEpochMs = NjtApiService.easternWallClockToEpochMs(summerWall);
+      final summerUtc =
+          DateTime.fromMillisecondsSinceEpoch(summerEpochMs, isUtc: true);
+      expect(summerUtc, equals(DateTime.utc(2026, 7, 15, 21, 45, 0)));
+    });
+
+    test('pollSingleTrainTrackFast parses track drop, TBA, and HTTP 429 backoff',
+        () async {
+      final trackDropClient = MockClient((req) async {
+        expect(req.body, contains('getTrainDepartureScreens(station: "NY")'));
+        return http.Response(
+          json.encode({
+            'data': {
+              'board': {
+                'items': [
+                  {
+                    'trainID': '3855',
+                    'status': 'Boarding',
+                    'track': '11',
+                    'inlineMessage': '',
+                  },
+                  {
+                    'trainID': '3857',
+                    'status': 'On Time',
+                    'track': '',
+                    'inlineMessage': '',
+                  },
+                ],
+              },
+            },
+          }),
+          200,
+        );
+      });
+
+      final posted = await NjtApiService.pollSingleTrainTrackFast(
+        originCode: 'NY',
+        trainId: '3855',
+        httpClient: trackDropClient,
+      );
+      expect(posted, isNotNull);
+      expect(posted!.foundOnBoard, isTrue);
+      expect(posted.hasTrack, isTrue);
+      expect(posted.track, equals('11'));
+      expect(posted.rateLimited, isFalse);
+
+      final tba = await NjtApiService.pollSingleTrainTrackFast(
+        originCode: 'NY',
+        trainId: '3857',
+        httpClient: trackDropClient,
+      );
+      expect(tba, isNotNull);
+      expect(tba!.foundOnBoard, isTrue);
+      expect(tba.hasTrack, isFalse);
+
+      final rateLimitClient = MockClient(
+        (_) async => http.Response('Too Many Requests', 429),
+      );
+      final limited = await NjtApiService.pollSingleTrainTrackFast(
+        originCode: 'NY',
+        trainId: '3855',
+        httpClient: rateLimitClient,
+      );
+      expect(limited, isNotNull);
+      expect(limited!.rateLimited, isTrue);
+      expect(limited.hasTrack, isFalse);
+    });
+
+    test(
+        'Watch Track 1s fast polling respects 11m-9m window, delay exception, and safety caps',
+        () {
+      final dep = DateTime(2026, 11, 16, 18, 0, 0);
+      TrainTrip makeTrip({String status = 'On Time', String? track}) =>
+          TrainTrip(
+            trainId: '3861',
+            line: 'Northeast Corridor',
+            lineBadge: 'NEC',
+            originCode: 'NY',
+            destinationCode: 'MP',
+            finalDestinationName: 'Trenton',
+            departureTime: '6:00 PM',
+            arrivalTime: '6:42 PM',
+            departureDateTime: dep,
+            durationMinutes: 42,
+            status: status,
+            track: track,
+            isExpress: true,
+            dataSource: 'Live NJT DepartureVision',
+            stops: const [],
+          );
+
+      // 12 min before departure (> 11m): stay on normal 5s schedule poll
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(),
+          nowEastern: dep.subtract(const Duration(minutes: 12)),
+        ),
+        isFalse,
+      );
+
+      // 11 min before departure (exact start of burst): enable 1s fast polling
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(),
+          nowEastern: dep.subtract(const Duration(minutes: 11)),
+        ),
+        isTrue,
+      );
+
+      // 10 min before departure (typical NJT track drop window): enable 1s fast polling
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(),
+          nowEastern: dep.subtract(const Duration(minutes: 10)),
+        ),
+        isTrue,
+      );
+
+      // 8 min before departure (< 9m guardrail) while On Time: stop 1s fast polling
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(status: 'On Time'),
+          nowEastern: dep.subtract(const Duration(minutes: 8)),
+        ),
+        isFalse,
+      );
+
+      // 8 min before departure while Delayed (non-routine condition): extend 1s polling past 9m
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(status: 'Delayed 8 min'),
+          nowEastern: dep.subtract(const Duration(minutes: 8)),
+          fastBurstStartedAt: dep.subtract(const Duration(minutes: 11)),
+        ),
+        isTrue,
+      );
+
+      // Delayed train that has exceeded the 8m continuous burst safety cap: stop 1s burst
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(status: 'Delayed 15 min'),
+          nowEastern: dep.subtract(const Duration(minutes: 2)),
+          fastBurstStartedAt: dep.subtract(const Duration(minutes: 11)),
+        ),
+        isFalse,
+      );
+
+      // Track already assigned: stop 1s polling immediately
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(track: '9'),
+          nowEastern: dep.subtract(const Duration(minutes: 10)),
+        ),
+        isFalse,
+      );
+
+      // Cancelled train: stop 1s polling
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(status: 'Cancelled'),
+          nowEastern: dep.subtract(const Duration(minutes: 10)),
+        ),
+        isFalse,
+      );
+
+      // Rate-limit backoff active: pause 1s polling
+      final nowAt10m = dep.subtract(const Duration(minutes: 10));
+      expect(
+        AppState.shouldUseFastTrackWatchPolling(
+          watchedTrip: makeTrip(),
+          nowEastern: nowAt10m,
+          rateLimitBackoffUntil: nowAt10m.add(const Duration(seconds: 20)),
+        ),
+        isFalse,
+      );
+    });
   });
 }
+

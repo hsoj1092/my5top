@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -81,10 +82,11 @@ class NotificationService {
   }
 
   static Future<void> showCommuteAlert({
-    required String type, // 'track', 'stop', 'arrival'
+    required String type, // 'track', 'stop', 'arrival', 'info'
     required String title,
     required String body,
     bool vibrate = true,
+    bool headphoneAudioBypass = true,
   }) async {
     _emitInApp(type, title, body);
     if (!kIsWeb && Platform.isAndroid) {
@@ -95,8 +97,67 @@ class NotificationService {
           'title': title,
           'body': body,
           'vibrate': vibrate,
+          'headphoneAudioBypass': headphoneAudioBypass,
         });
       } catch (_) {}
     }
+  }
+
+  /// Starts or updates the Android foreground service that keeps active ride
+  /// or track watch alive silently in the background (even if swiped away),
+  /// guarded by strict arrival/time cutoffs.
+  static Future<void> startBackgroundGuard(Map<String, dynamic> payload) async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        await _channel.invokeMethod('startBackgroundGuard', {
+          'payloadJson': json.encode(payload),
+        });
+      } catch (_) {}
+    }
+  }
+
+  /// Stops the Android foreground background guard service cleanly.
+  static Future<void> stopBackgroundGuard() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        await _channel.invokeMethod('stopBackgroundGuard');
+      } catch (_) {}
+    }
+  }
+
+  /// Re-attaches UI to the foreground service and retrieves any stop/track
+  /// progress or user stop action recorded while the UI was closed.
+  static Future<Map<String, dynamic>?> syncBackgroundState() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final res = await _channel
+            .invokeMethod<Map<dynamic, dynamic>>('syncBackgroundState');
+        if (res != null) {
+          return Map<String, dynamic>.from(res);
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// Moves the Android Activity to the background without terminating it,
+  /// preventing accidental close when pressing Back during an active ride/watch.
+  static Future<void> moveToBackground() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        await _channel.invokeMethod('moveToBackground');
+      } catch (_) {}
+    }
+  }
+
+  /// Checks whether wired, USB-C, or Bluetooth headphones/earbuds are active.
+  static Future<bool> isHeadphonesConnected() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final res = await _channel.invokeMethod<bool>('isHeadphonesConnected');
+        return res == true;
+      } catch (_) {}
+    }
+    return false;
   }
 }
