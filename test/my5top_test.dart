@@ -874,7 +874,11 @@ void main() {
     test('pollSingleTrainTrackFast parses track drop, TBA, and HTTP 429 backoff',
         () async {
       final trackDropClient = MockClient((req) async {
-        expect(req.body, contains('getTrainDepartureScreens(station: "NY")'));
+        final decodedBody = json.decode(req.body) as Map<String, dynamic>;
+        expect(
+          decodedBody['query'],
+          contains('getTrainDepartureScreens(station: "NY")'),
+        );
         return http.Response(
           json.encode({
             'data': {
