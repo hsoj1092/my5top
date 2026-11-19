@@ -32,8 +32,12 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        CommuteAlertHelper.ensureNotificationChannels(this)
-        CommuteForegroundService.onUiAttached(applicationContext)
+        try {
+            CommuteAlertHelper.ensureNotificationChannels(this)
+        } catch (_: Throwable) {}
+        try {
+            CommuteForegroundService.onUiAttached(applicationContext)
+        } catch (_: Throwable) {}
 
         val backupChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, safChannelName)
         safChannel = backupChannel
@@ -69,79 +73,87 @@ class MainActivity : FlutterActivity() {
         val notificationChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, notifChannelName)
         notifChannel = notificationChannel
         notificationChannel.setMethodCallHandler { call, result ->
-            when (call.method) {
-                "requestPermission" -> {
-                    requestNotificationPermission(result)
-                }
-                "showRideProgress" -> {
-                    val title = call.argument<String>("title") ?: "Active Commute"
-                    val body = call.argument<String>("body") ?: ""
-                    val subText = call.argument<String>("subText") ?: "my5top"
-                    val passedStops = call.argument<Int>("passedStops") ?: 0
-                    val totalStops = call.argument<Int>("totalStops") ?: 1
-                    CommuteAlertHelper.showRideProgressNotification(
-                        this,
-                        title,
-                        body,
-                        subText,
-                        passedStops,
-                        totalStops
-                    )
-                    result.success(true)
-                }
-                "cancelRideProgress" -> {
-                    CommuteAlertHelper.cancelRideProgressNotification(this)
-                    result.success(true)
-                }
-                "showAlert" -> {
-                    val id = call.argument<Int>("id") ?: (System.currentTimeMillis() % 100000).toInt()
-                    val type = call.argument<String>("type") ?: "stop"
-                    val title = call.argument<String>("title") ?: "my5top Alert"
-                    val body = call.argument<String>("body") ?: ""
-                    val vibrate = call.argument<Boolean>("vibrate") ?: true
-                    val headphoneAudioBypass = call.argument<Boolean>("headphoneAudioBypass") ?: true
-                    CommuteAlertHelper.showCommuteAlertNotification(
-                        this,
-                        id,
-                        type,
-                        title,
-                        body,
-                        vibrate,
-                        headphoneAudioBypass
-                    )
-                    result.success(true)
-                }
-                "startBackgroundGuard" -> {
-                    val payloadJson = call.argument<String>("payloadJson") ?: ""
-                    if (payloadJson.isNotBlank()) {
-                        CommuteForegroundService.startOrUpdate(applicationContext, payloadJson)
+            try {
+                when (call.method) {
+                    "requestPermission" -> {
+                        requestNotificationPermission(result)
                     }
-                    result.success(true)
+                    "showRideProgress" -> {
+                        val title = call.argument<String>("title") ?: "Active Commute"
+                        val body = call.argument<String>("body") ?: ""
+                        val subText = call.argument<String>("subText") ?: "my5top"
+                        val passedStops = call.argument<Int>("passedStops") ?: 0
+                        val totalStops = call.argument<Int>("totalStops") ?: 1
+                        CommuteAlertHelper.showRideProgressNotification(
+                            this,
+                            title,
+                            body,
+                            subText,
+                            passedStops,
+                            totalStops
+                        )
+                        result.success(true)
+                    }
+                    "cancelRideProgress" -> {
+                        CommuteAlertHelper.cancelRideProgressNotification(this)
+                        result.success(true)
+                    }
+                    "showAlert" -> {
+                        val id = call.argument<Int>("id") ?: (System.currentTimeMillis() % 100000).toInt()
+                        val type = call.argument<String>("type") ?: "stop"
+                        val title = call.argument<String>("title") ?: "my5top Alert"
+                        val body = call.argument<String>("body") ?: ""
+                        val vibrate = call.argument<Boolean>("vibrate") ?: true
+                        val headphoneAudioBypass = call.argument<Boolean>("headphoneAudioBypass") ?: true
+                        CommuteAlertHelper.showCommuteAlertNotification(
+                            this,
+                            id,
+                            type,
+                            title,
+                            body,
+                            vibrate,
+                            headphoneAudioBypass
+                        )
+                        result.success(true)
+                    }
+                    "startBackgroundGuard" -> {
+                        val payloadJson = call.argument<String>("payloadJson") ?: ""
+                        if (payloadJson.isNotBlank()) {
+                            CommuteForegroundService.startOrUpdate(applicationContext, payloadJson)
+                        }
+                        result.success(true)
+                    }
+                    "stopBackgroundGuard" -> {
+                        CommuteForegroundService.stopService(applicationContext)
+                        result.success(true)
+                    }
+                    "syncBackgroundState" -> {
+                        CommuteForegroundService.onUiAttached(applicationContext)
+                        val updates = CommuteForegroundService.consumeBackgroundUpdates(applicationContext)
+                        result.success(updates)
+                    }
+                    "moveToBackground" -> {
+                        val moved = moveTaskToBack(true)
+                        result.success(moved)
+                    }
+                    "isHeadphonesConnected" -> {
+                        result.success(CommuteAlertHelper.isHeadphonesConnected(this))
+                    }
+                    else -> result.notImplemented()
                 }
-                "stopBackgroundGuard" -> {
-                    CommuteForegroundService.stopService(applicationContext)
-                    result.success(true)
-                }
-                "syncBackgroundState" -> {
-                    CommuteForegroundService.onUiAttached(applicationContext)
-                    val updates = CommuteForegroundService.consumeBackgroundUpdates(applicationContext)
-                    result.success(updates)
-                }
-                "moveToBackground" -> {
-                    val moved = moveTaskToBack(true)
-                    result.success(moved)
-                }
-                "isHeadphonesConnected" -> {
-                    result.success(CommuteAlertHelper.isHeadphonesConnected(this))
-                }
-                else -> result.notImplemented()
+            } catch (e: Throwable) {
+                try {
+                    result.error("NOTIF_CHANNEL_ERROR", e.message, null)
+                } catch (_: Throwable) {}
             }
         }
     }
 
     override fun onPostResume() {
         super.onPostResume()
-        CommuteForegroundService.onUiAttached(applicationContext)
+        try {
+            CommuteForegroundService.onUiAttached(applicationContext)
+        } catch (_: Throwable) {}
         if (!requestedNotifOnResume) {
             requestedNotifOnResume = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -160,7 +172,9 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        CommuteForegroundService.onUiDetached(applicationContext)
+        try {
+            CommuteForegroundService.onUiDetached(applicationContext)
+        } catch (_: Throwable) {}
         super.onDestroy()
     }
 

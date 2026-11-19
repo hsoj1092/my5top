@@ -105,10 +105,9 @@ class CommuteForegroundService : Service() {
                     .edit()
                     .remove(KEY_PAYLOAD_JSON)
                     .apply()
-                val intent = Intent(appCtx, CommuteForegroundService::class.java).apply {
-                    action = ACTION_STOP
+                if (isRunning) {
+                    appCtx.stopService(Intent(appCtx, CommuteForegroundService::class.java))
                 }
-                appCtx.startService(intent)
             } catch (_: Throwable) {}
         }
 
@@ -136,46 +135,50 @@ class CommuteForegroundService : Service() {
             } catch (_: Throwable) {}
         }
 
-        fun consumeBackgroundUpdates(context: Context): Map<String, Any?> {
-            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val hasUpdates = prefs.getBoolean(KEY_HAS_UPDATES, false)
-            if (!hasUpdates) {
-                return mapOf("hasUpdates" to false)
-            }
-            val notifiedList = mutableListOf<Int>()
-            try {
-                val rawArr = prefs.getString(KEY_BG_NOTIFIED_INDICES, null)
-                if (!rawArr.isNullOrBlank()) {
-                    val arr = JSONArray(rawArr)
-                    for (i in 0 until arr.length()) {
-                        notifiedList.add(arr.optInt(i))
-                    }
+        fun consumeBackgroundUpdates(context: Context): HashMap<String, Any?> {
+            return try {
+                val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val hasUpdates = prefs.getBoolean(KEY_HAS_UPDATES, false)
+                if (!hasUpdates) {
+                    return hashMapOf("hasUpdates" to false)
                 }
-            } catch (_: Throwable) {}
+                val notifiedList = ArrayList<Int>()
+                try {
+                    val rawArr = prefs.getString(KEY_BG_NOTIFIED_INDICES, null)
+                    if (!rawArr.isNullOrBlank()) {
+                        val arr = JSONArray(rawArr)
+                        for (i in 0 until arr.length()) {
+                            notifiedList.add(arr.optInt(i))
+                        }
+                    }
+                } catch (_: Throwable) {}
 
-            val result = mutableMapOf<String, Any?>(
-                "hasUpdates" to true,
-                "mode" to (prefs.getString(KEY_BG_MODE, "") ?: ""),
-                "trainId" to (prefs.getString(KEY_BG_TRAIN_ID, "") ?: ""),
-                "currentStopIndex" to prefs.getInt(KEY_BG_STOP_INDEX, -1),
-                "notifiedStopIndices" to notifiedList,
-                "hasFiredWakeUpAlarm" to prefs.getBoolean(KEY_BG_FIRED_WAKEUP, false),
-                "lastTrackingSignalSource" to (prefs.getString(KEY_BG_SIGNAL_SOURCE, "") ?: ""),
-                "detectedTrack" to (prefs.getString(KEY_BG_DETECTED_TRACK, "") ?: ""),
-                "detectedStatus" to (prefs.getString(KEY_BG_DETECTED_STATUS, "") ?: ""),
-                "arrived" to prefs.getBoolean(KEY_BG_ARRIVED, false),
-                "stoppedByUser" to prefs.getBoolean(KEY_BG_STOPPED_BY_USER, false),
-                "stopReason" to (prefs.getString(KEY_BG_STOP_REASON, "") ?: "")
-            )
+                val result = hashMapOf<String, Any?>(
+                    "hasUpdates" to true,
+                    "mode" to (prefs.getString(KEY_BG_MODE, "") ?: ""),
+                    "trainId" to (prefs.getString(KEY_BG_TRAIN_ID, "") ?: ""),
+                    "currentStopIndex" to prefs.getInt(KEY_BG_STOP_INDEX, -1),
+                    "notifiedStopIndices" to notifiedList,
+                    "hasFiredWakeUpAlarm" to prefs.getBoolean(KEY_BG_FIRED_WAKEUP, false),
+                    "lastTrackingSignalSource" to (prefs.getString(KEY_BG_SIGNAL_SOURCE, "") ?: ""),
+                    "detectedTrack" to (prefs.getString(KEY_BG_DETECTED_TRACK, "") ?: ""),
+                    "detectedStatus" to (prefs.getString(KEY_BG_DETECTED_STATUS, "") ?: ""),
+                    "arrived" to prefs.getBoolean(KEY_BG_ARRIVED, false),
+                    "stoppedByUser" to prefs.getBoolean(KEY_BG_STOPPED_BY_USER, false),
+                    "stopReason" to (prefs.getString(KEY_BG_STOP_REASON, "") ?: "")
+                )
 
-            prefs.edit()
-                .putBoolean(KEY_HAS_UPDATES, false)
-                .remove(KEY_BG_DETECTED_TRACK)
-                .remove(KEY_BG_STOPPED_BY_USER)
-                .remove(KEY_BG_STOP_REASON)
-                .apply()
+                prefs.edit()
+                    .putBoolean(KEY_HAS_UPDATES, false)
+                    .remove(KEY_BG_DETECTED_TRACK)
+                    .remove(KEY_BG_STOPPED_BY_USER)
+                    .remove(KEY_BG_STOP_REASON)
+                    .apply()
 
-            return result
+                result
+            } catch (_: Throwable) {
+                hashMapOf("hasUpdates" to false)
+            }
         }
     }
 

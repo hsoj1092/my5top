@@ -48,7 +48,8 @@ class ActiveRideRouteObserver extends NavigatorObserver {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    final packageInfo = await PackageInfo.fromPlatform();
+    final packageInfo =
+        await PackageInfo.fromPlatform().timeout(const Duration(seconds: 2));
     AppState.appVersion = packageInfo.version;
     AppState.appBuildNumber = int.tryParse(packageInfo.buildNumber) ?? 1;
   } catch (e) {

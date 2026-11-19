@@ -20,6 +20,7 @@ class InAppAlertEvent {
 class NotificationService {
   static const MethodChannel _channel =
       MethodChannel('com.my5top.commute/notifications');
+  static const Duration _channelTimeout = Duration(seconds: 2);
 
   static final List<void Function(InAppAlertEvent)> _listeners = [];
 
@@ -48,7 +49,9 @@ class NotificationService {
   static Future<void> requestPermission() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        await _channel.invokeMethod('requestPermission');
+        await _channel
+            .invokeMethod('requestPermission')
+            .timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -68,7 +71,7 @@ class NotificationService {
           'subText': subText,
           'passedStops': passedStops,
           'totalStops': totalStops,
-        });
+        }).timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -76,7 +79,9 @@ class NotificationService {
   static Future<void> cancelRideProgress() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        await _channel.invokeMethod('cancelRideProgress');
+        await _channel
+            .invokeMethod('cancelRideProgress')
+            .timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -98,7 +103,7 @@ class NotificationService {
           'body': body,
           'vibrate': vibrate,
           'headphoneAudioBypass': headphoneAudioBypass,
-        });
+        }).timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -111,7 +116,7 @@ class NotificationService {
       try {
         await _channel.invokeMethod('startBackgroundGuard', {
           'payloadJson': json.encode(payload),
-        });
+        }).timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -120,7 +125,9 @@ class NotificationService {
   static Future<void> stopBackgroundGuard() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        await _channel.invokeMethod('stopBackgroundGuard');
+        await _channel
+            .invokeMethod('stopBackgroundGuard')
+            .timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -131,7 +138,8 @@ class NotificationService {
     if (!kIsWeb && Platform.isAndroid) {
       try {
         final res = await _channel
-            .invokeMethod<Map<dynamic, dynamic>>('syncBackgroundState');
+            .invokeMethod<Map<dynamic, dynamic>>('syncBackgroundState')
+            .timeout(_channelTimeout);
         if (res != null) {
           return Map<String, dynamic>.from(res);
         }
@@ -145,7 +153,9 @@ class NotificationService {
   static Future<void> moveToBackground() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        await _channel.invokeMethod('moveToBackground');
+        await _channel
+            .invokeMethod('moveToBackground')
+            .timeout(_channelTimeout);
       } catch (_) {}
     }
   }
@@ -154,7 +164,9 @@ class NotificationService {
   static Future<bool> isHeadphonesConnected() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        final res = await _channel.invokeMethod<bool>('isHeadphonesConnected');
+        final res = await _channel
+            .invokeMethod<bool>('isHeadphonesConnected')
+            .timeout(_channelTimeout);
         return res == true;
       } catch (_) {}
     }

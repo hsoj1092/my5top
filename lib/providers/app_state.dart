@@ -140,7 +140,63 @@ class AppState extends ChangeNotifier {
   bool _initialized = false;
   bool get initialized => _initialized;
 
-  late Box _settingsBox;
+  Box? _settingsBox;
+
+  dynamic _boxGet(String key, {dynamic defaultValue}) {
+    try {
+      final box = _settingsBox;
+      if (box == null || !box.isOpen) return defaultValue;
+      final val = box.get(key, defaultValue: defaultValue);
+      return val ?? defaultValue;
+    } catch (_) {
+      return defaultValue;
+    }
+  }
+
+  Future<void> _boxPut(String key, dynamic value) async {
+    try {
+      final box = _settingsBox;
+      if (box != null && box.isOpen) {
+        await box.put(key, value);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _boxDelete(String key) async {
+    try {
+      final box = _settingsBox;
+      if (box != null && box.isOpen) {
+        await box.delete(key);
+      }
+    } catch (_) {}
+  }
+
+  String _readString(
+    String key,
+    String fallback, {
+    bool allowEmpty = true,
+  }) {
+    final val = _boxGet(key);
+    if (val is String) {
+      if (allowEmpty || val.isNotEmpty) return val;
+    }
+    return fallback;
+  }
+
+  String? _readNullableString(String key) {
+    final val = _boxGet(key);
+    return val is String ? val : null;
+  }
+
+  bool _readBool(String key, bool fallback) {
+    final val = _boxGet(key);
+    return val is bool ? val : fallback;
+  }
+
+  double _readDouble(String key, double fallback) {
+    final val = _boxGet(key);
+    return val is num ? val.toDouble() : fallback;
+  }
 
   // Theme & Anime Aesthetic State
   String _animeThemeStyle = 'mygo'; // 'mygo' or 'sakura'
@@ -325,47 +381,86 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _init() async {
-    await Hive.initFlutter();
-    _settingsBox = await Hive.openBox('my5top_settings');
-    await _loadFromBox();
-    await syncFromBackgroundGuard();
-    _initialized = true;
-    notifyListeners();
-
-    await NotificationService.requestPermission();
-    if (_activeRideTrain != null) {
-      await _startGpsStream();
-      await _updateOngoingNotification();
-      await _syncBackgroundGuard();
-    } else {
-      await NotificationService.cancelRideProgress();
-      await NotificationService.stopBackgroundGuard();
+    try {
+      await Hive.initFlutter().timeout(const Duration(seconds: 5));
+      try {
+        _settingsBox = await Hive.openBox('my5top_settings')
+            .timeout(const Duration(seconds: 5));
+      } catch (e) {
+        debugPrint('my5top Hive openBox failed, recovering clean box: $e');
+        try {
+          await Hive.deleteBoxFromDisk('my5top_settings')
+              .timeout(const Duration(seconds: 3));
+          _settingsBox = await Hive.openBox('my5top_settings')
+              .timeout(const Duration(seconds: 5));
+        } catch (recoveryErr) {
+          debugPrint(
+            'my5top Hive recovery failed (continuing with in-memory defaults): $recoveryErr',
+          );
+          _settingsBox = null;
+        }
+      }
+      await _loadFromBox();
+    } catch (e) {
+      debugPrint('my5top startup init error (continuing with defaults): $e');
+    } finally {
+      _initialized = true;
+      notifyListeners();
     }
-    await refreshSchedules();
+
+    unawaited(_runPostInitTasks());
+  }
+
+  Future<void> _runPostInitTasks() async {
     _startPeriodicSchedulePoll();
-    _initLastKnownGps();
+    unawaited(refreshSchedules());
+    unawaited(_initLastKnownGps());
+
+    try {
+      await syncFromBackgroundGuard();
+    } catch (_) {}
+
+    try {
+      await NotificationService.requestPermission();
+    } catch (_) {}
+
+    if (_activeRideTrain != null) {
+      unawaited(_startGpsStream());
+      try {
+        await _syncBackgroundGuard();
+      } catch (_) {}
+    } else {
+      try {
+        await NotificationService.cancelRideProgress();
+        await NotificationService.stopBackgroundGuard();
+      } catch (_) {}
+    }
   }
 
   Future<void> _loadFromBox() async {
     _animeThemeStyle =
-        _settingsBox.get('anime_theme_style', defaultValue: 'mygo') as String;
-    _isDarkMode = _settingsBox.get('is_dark_mode', defaultValue: true) as bool;
-    _isPureBlackDarkMode =
-        _settingsBox.get('pure_black_dark_mode', defaultValue: false) as bool;
+        _readString('anime_theme_style', 'mygo', allowEmpty: false);
+    _isDarkMode = _readBool('is_dark_mode', true);
+    _isPureBlackDarkMode = _readBool('pure_black_dark_mode', false);
     _textScaleFactor =
-        (_settingsBox.get('text_scale_factor', defaultValue: 1.0) as num)
-            .toDouble();
-    _devTestMode =
-        _settingsBox.get('dev_test_mode', defaultValue: false) as bool;
+        _readDouble('text_scale_factor', 1.0).clamp(0.85, 1.35);
+    _devTestMode = _readBool('dev_test_mode', false);
 
     _workStationCode =
-        _settingsBox.get('work_station_code', defaultValue: 'NY') as String;
+        _readString('work_station_code', 'NY', allowEmpty: false);
     _homeStationCode =
-        _settingsBox.get('home_station_code', defaultValue: 'MP') as String;
+        _readString('home_station_code', 'MP', allowEmpty: false);
 
-    final rawStarred = _settingsBox.get('starred_station_codes');
+    final rawStarred = _boxGet('starred_station_codes');
     if (rawStarred is List) {
-      _starredStationCodes = rawStarred.map((e) => e.toString()).toList();
+      final parsedStarred = rawStarred
+          .where((e) => e != null)
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      _starredStationCodes = parsedStarred.isNotEmpty
+          ? parsedStarred
+          : ['NY', 'MP', 'NP', 'SE', 'RA'];
     } else {
       _starredStationCodes = ['NY', 'MP', 'NP', 'SE', 'RA'];
     }
@@ -373,9 +468,13 @@ class AppState extends ChangeNotifier {
     // Smart default commute direction based on time of day:
     // Morning (before 12 PM): Home (Metropark) -> Work (NY Penn)
     // Afternoon/Evening: Work (NY Penn) -> Home (Metropark)
-    final savedOrig = _settingsBox.get('origin_station_code') as String?;
-    final savedDest = _settingsBox.get('destination_station_code') as String?;
-    if (savedOrig != null && savedDest != null && savedOrig != savedDest) {
+    final savedOrig = _readNullableString('origin_station_code');
+    final savedDest = _readNullableString('destination_station_code');
+    if (savedOrig != null &&
+        savedOrig.isNotEmpty &&
+        savedDest != null &&
+        savedDest.isNotEmpty &&
+        savedOrig != savedDest) {
       _originStationCode = savedOrig;
       _destinationStationCode = savedDest;
     } else {
@@ -389,32 +488,38 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    _njtUsername =
-        _settingsBox.get('njt_username', defaultValue: '') as String;
-    _njtPassword =
-        _settingsBox.get('njt_password', defaultValue: '') as String;
-    _cachedNjtToken =
-        _settingsBox.get('cached_njt_token', defaultValue: '') as String;
-    final tokenTimeStr = _settingsBox.get('cached_njt_token_time') as String?;
+    _njtUsername = _readString('njt_username', '');
+    _njtPassword = _readString('njt_password', '');
+    _cachedNjtToken = _readString('cached_njt_token', '');
+    final tokenTimeStr = _readNullableString('cached_njt_token_time');
     if (tokenTimeStr != null) {
       _cachedNjtTokenTime = DateTime.tryParse(tokenTimeStr);
     }
 
-    final rawRules = _settingsBox.get('notification_rules');
+    final rawRules = _boxGet('notification_rules');
     if (rawRules is Map) {
-      _notificationRules =
-          NotificationRules.fromJson(Map<String, dynamic>.from(rawRules));
+      try {
+        _notificationRules =
+            NotificationRules.fromJson(Map<String, dynamic>.from(rawRules));
+      } catch (_) {
+        _notificationRules = const NotificationRules();
+      }
     }
 
-    final rawLogs = _settingsBox.get('ride_logs');
+    final rawLogs = _boxGet('ride_logs');
     if (rawLogs is List) {
-      _rideLogs = rawLogs
-          .whereType<Map>()
-          .map((m) => RideLog.fromJson(Map<String, dynamic>.from(m)))
-          .toList();
+      final parsedLogs = <RideLog>[];
+      for (final item in rawLogs) {
+        if (item is Map) {
+          try {
+            parsedLogs.add(RideLog.fromJson(Map<String, dynamic>.from(item)));
+          } catch (_) {}
+        }
+      }
+      _rideLogs = parsedLogs;
     }
 
-    final rawRide = _settingsBox.get('active_ride_state');
+    final rawRide = _boxGet('active_ride_state');
     if (rawRide is Map) {
       try {
         final rideMap = Map<String, dynamic>.from(rawRide);
@@ -455,11 +560,11 @@ class AppState extends ChangeNotifier {
             if (_rideLogs.length > 50) {
               _rideLogs = _rideLogs.sublist(0, 50);
             }
-            await _settingsBox.put(
+            await _boxPut(
               'ride_logs',
               _rideLogs.map((e) => e.toJson()).toList(),
             );
-            await _settingsBox.delete('active_ride_state');
+            await _boxDelete('active_ride_state');
             _activeRideTrain = null;
           } else {
             // Active ride is still fresh (< 20 min past arrival): restore full tracking state!
@@ -507,9 +612,11 @@ class AppState extends ChangeNotifier {
                   .distanceMetersTo(dest.latitude, dest.longitude);
             }
           }
+        } else {
+          await _boxDelete('active_ride_state');
         }
       } catch (_) {
-        await _settingsBox.delete('active_ride_state');
+        await _boxDelete('active_ride_state');
       }
     }
   }
@@ -677,6 +784,7 @@ class AppState extends ChangeNotifier {
         await _syncBackgroundGuard();
       }
       notifyListeners();
+    } catch (_) {
     } finally {
       _isFastTrackPollInFlight = false;
     }
@@ -710,7 +818,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> setDevTestMode(bool val) async {
     _devTestMode = val;
-    await _settingsBox.put('dev_test_mode', val);
+    await _boxPut('dev_test_mode', val);
     if (!val && _isAutoSimulating) {
       stopAutoSimulate();
     }
@@ -720,7 +828,7 @@ class AppState extends ChangeNotifier {
   // --- Theme Controls ---
   Future<void> setAnimeThemeStyle(String style) async {
     _animeThemeStyle = style;
-    await _settingsBox.put('anime_theme_style', style);
+    await _boxPut('anime_theme_style', style);
     _notificationRules = _notificationRules.copyWith(mascotPersonality: style);
     await _saveNotificationRules();
     notifyListeners();
@@ -731,19 +839,19 @@ class AppState extends ChangeNotifier {
 
   Future<void> setDarkMode(bool val) async {
     _isDarkMode = val;
-    await _settingsBox.put('is_dark_mode', val);
+    await _boxPut('is_dark_mode', val);
     notifyListeners();
   }
 
   Future<void> setPureBlackDarkMode(bool val) async {
     _isPureBlackDarkMode = val;
-    await _settingsBox.put('pure_black_dark_mode', val);
+    await _boxPut('pure_black_dark_mode', val);
     notifyListeners();
   }
 
   Future<void> updateTextScale(double factor) async {
     _textScaleFactor = factor.clamp(0.85, 1.35);
-    await _settingsBox.put('text_scale_factor', _textScaleFactor);
+    await _boxPut('text_scale_factor', _textScaleFactor);
     notifyListeners();
   }
 
@@ -767,8 +875,8 @@ class AppState extends ChangeNotifier {
           [];
       await _syncBackgroundGuard();
     }
-    await _settingsBox.put('origin_station_code', origCode);
-    await _settingsBox.put('destination_station_code', destCode);
+    await _boxPut('origin_station_code', origCode);
+    await _boxPut('destination_station_code', destCode);
     notifyListeners();
     await refreshSchedules(forceNetwork: true);
   }
@@ -789,9 +897,9 @@ class AppState extends ChangeNotifier {
     _workStationCode = code;
     if (!_starredStationCodes.contains(code)) {
       _starredStationCodes.add(code);
-      await _settingsBox.put('starred_station_codes', _starredStationCodes);
+      await _boxPut('starred_station_codes', _starredStationCodes);
     }
-    await _settingsBox.put('work_station_code', code);
+    await _boxPut('work_station_code', code);
     notifyListeners();
   }
 
@@ -799,9 +907,9 @@ class AppState extends ChangeNotifier {
     _homeStationCode = code;
     if (!_starredStationCodes.contains(code)) {
       _starredStationCodes.add(code);
-      await _settingsBox.put('starred_station_codes', _starredStationCodes);
+      await _boxPut('starred_station_codes', _starredStationCodes);
     }
-    await _settingsBox.put('home_station_code', code);
+    await _boxPut('home_station_code', code);
     notifyListeners();
   }
 
@@ -813,7 +921,7 @@ class AppState extends ChangeNotifier {
     } else {
       _starredStationCodes.add(code);
     }
-    await _settingsBox.put('starred_station_codes', _starredStationCodes);
+    await _boxPut('starred_station_codes', _starredStationCodes);
     notifyListeners();
   }
 
@@ -831,19 +939,19 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _saveNotificationRules() async {
-    await _settingsBox.put('notification_rules', _notificationRules.toJson());
+    await _boxPut('notification_rules', _notificationRules.toJson());
   }
 
   // --- NJ Transit API & Schedule Fetching ---
   Future<bool> saveAndTestNjtCredentials(String username, String password) async {
     _njtUsername = username.trim();
     _njtPassword = password.trim();
-    await _settingsBox.put('njt_username', _njtUsername);
-    await _settingsBox.put('njt_password', _njtPassword);
+    await _boxPut('njt_username', _njtUsername);
+    await _boxPut('njt_password', _njtPassword);
 
     if (_njtUsername.isEmpty || _njtPassword.isEmpty) {
       _cachedNjtToken = '';
-      await _settingsBox.put('cached_njt_token', '');
+      await _boxPut('cached_njt_token', '');
       notifyListeners();
       await refreshSchedules(forceNetwork: true);
       return false;
@@ -856,8 +964,8 @@ class AppState extends ChangeNotifier {
     if (token != null && token.isNotEmpty) {
       _cachedNjtToken = token;
       _cachedNjtTokenTime = DateTime.now();
-      await _settingsBox.put('cached_njt_token', token);
-      await _settingsBox.put(
+      await _boxPut('cached_njt_token', token);
+      await _boxPut(
         'cached_njt_token_time',
         _cachedNjtTokenTime!.toIso8601String(),
       );
@@ -883,8 +991,8 @@ class AppState extends ChangeNotifier {
       if (fresh != null) {
         _cachedNjtToken = fresh;
         _cachedNjtTokenTime = DateTime.now();
-        await _settingsBox.put('cached_njt_token', fresh);
-        await _settingsBox.put(
+        await _boxPut('cached_njt_token', fresh);
+        await _boxPut(
           'cached_njt_token_time',
           _cachedNjtTokenTime!.toIso8601String(),
         );
@@ -912,7 +1020,8 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      final token = await _getValidNjtToken();
+      final token = await _getValidNjtToken()
+          .timeout(const Duration(seconds: 8), onTimeout: () => null);
       final previousTrains = List<TrainTrip>.from(_upcomingTrains);
 
       final fetched = await NjtApiService.fetchUpcomingTrains(
@@ -922,7 +1031,7 @@ class AppState extends ChangeNotifier {
         forceRefresh: forceNetwork || !silent,
         watchedTrainId: _watchedTrainId,
         activeRideTrainId: _activeRideTrain?.trainId,
-      );
+      ).timeout(const Duration(seconds: 20));
 
       // Discard stale poll results if a newer direction switch or reload started
       if (requestGen != _refreshGeneration ||
@@ -1019,6 +1128,15 @@ class AppState extends ChangeNotifier {
       _upcomingTrains = merged;
       _isLoadingTrains = false;
       _lastScheduleRefresh = DateTime.now();
+    } catch (e) {
+      debugPrint('my5top refreshSchedules error: $e');
+      if (requestGen == _refreshGeneration && _upcomingTrains.isEmpty) {
+        _upcomingTrains = NjtApiService.generateSmartSchedule(
+          originCode: reqOrigin,
+          destinationCode: reqDest,
+        );
+        _lastScheduleRefresh = DateTime.now();
+      }
     } finally {
       if (requestGen == _refreshGeneration) {
         _isPollInFlight = false;
@@ -1104,10 +1222,10 @@ class AppState extends ChangeNotifier {
   Future<void> _saveActiveRideToBox() async {
     final trip = _activeRideTrain;
     if (trip == null) {
-      await _settingsBox.delete('active_ride_state');
+      await _boxDelete('active_ride_state');
       return;
     }
-    await _settingsBox.put('active_ride_state', {
+    await _boxPut('active_ride_state', {
       'trip': trip.toJson(),
       'arrivalEasternIso': _activeRideArrivalEastern?.toIso8601String(),
       'boardedAtIso': _activeRideBoardedAt?.toIso8601String(),
@@ -1550,91 +1668,97 @@ class AppState extends ChangeNotifier {
   /// Pulls any progress, track announcements, or 1-tap notification stop events
   /// recorded by the native Android Foreground Service while the UI was closed.
   Future<void> syncFromBackgroundGuard() async {
-    final updates = await NotificationService.syncBackgroundState();
-    if (updates == null || updates['hasUpdates'] != true) return;
+    try {
+      final updates = await NotificationService.syncBackgroundState();
+      if (updates == null || updates['hasUpdates'] != true) return;
 
-    final bgMode = (updates['mode'] ?? '').toString();
-    final bgTrainId = (updates['trainId'] ?? '').toString();
-    final stoppedByUser = updates['stoppedByUser'] == true;
+      final bgMode = (updates['mode'] ?? '').toString();
+      final bgTrainId = (updates['trainId'] ?? '').toString();
+      final stoppedByUser = updates['stoppedByUser'] == true;
 
-    if (stoppedByUser) {
-      if (bgMode == 'ride' && _activeRideTrain != null) {
-        await completeOrCancelRide(saveToHistory: true);
-      } else if (bgMode == 'watch' && _watchedTrainId != null) {
-        _clearWatchedTrain();
-      }
-      return;
-    }
-
-    if (bgMode == 'ride' &&
-        _activeRideTrain != null &&
-        _activeRideTrain!.trainId == bgTrainId) {
-      bool changed = false;
-      final bgStopIdx = (updates['currentStopIndex'] as num?)?.toInt() ?? -1;
-      final stops = activeCommuteStops;
-      if (stops.isNotEmpty && bgStopIdx > _currentStopIndex) {
-        _currentStopIndex = bgStopIdx.clamp(0, stops.length - 1);
-        final currSt = stops[_currentStopIndex];
-        final destSt = stops.last;
-        _distanceToDestinationMeters = getStationByCode(currSt.stationCode)
-            .distanceMetersTo(destSt.latitude, destSt.longitude);
-        if (_currentStopIndex < stops.length - 1) {
-          final nextSt = stops[_currentStopIndex + 1];
-          _distanceToNextStopMeters = getStationByCode(currSt.stationCode)
-              .distanceMetersTo(nextSt.latitude, nextSt.longitude);
-          _segmentProgress = 0.0;
-        } else {
-          _distanceToNextStopMeters = 0;
-          _segmentProgress = 1.0;
+      if (stoppedByUser) {
+        if (bgMode == 'ride' && _activeRideTrain != null) {
+          await completeOrCancelRide(saveToHistory: true);
+        } else if (bgMode == 'watch' && _watchedTrainId != null) {
+          _clearWatchedTrain();
         }
-        changed = true;
+        return;
       }
 
-      final bgNotified = updates['notifiedStopIndices'];
-      if (bgNotified is List) {
-        for (final item in bgNotified) {
-          if (item is num) {
-            if (_notifiedStopIndices.add(item.toInt())) {
-              changed = true;
+      if (bgMode == 'ride' &&
+          _activeRideTrain != null &&
+          _activeRideTrain!.trainId == bgTrainId) {
+        bool changed = false;
+        final bgStopIdx = (updates['currentStopIndex'] as num?)?.toInt() ?? -1;
+        final stops = activeCommuteStops;
+        if (stops.isNotEmpty && bgStopIdx > _currentStopIndex) {
+          _currentStopIndex = bgStopIdx.clamp(0, stops.length - 1);
+          final currSt = stops[_currentStopIndex];
+          final destSt = stops.last;
+          _distanceToDestinationMeters = getStationByCode(currSt.stationCode)
+              .distanceMetersTo(destSt.latitude, destSt.longitude);
+          if (_currentStopIndex < stops.length - 1) {
+            final nextSt = stops[_currentStopIndex + 1];
+            _distanceToNextStopMeters = getStationByCode(currSt.stationCode)
+                .distanceMetersTo(nextSt.latitude, nextSt.longitude);
+            _segmentProgress = 0.0;
+          } else {
+            _distanceToNextStopMeters = 0;
+            _segmentProgress = 1.0;
+          }
+          changed = true;
+        }
+
+        final bgNotified = updates['notifiedStopIndices'];
+        if (bgNotified is List) {
+          for (final item in bgNotified) {
+            if (item is num) {
+              if (_notifiedStopIndices.add(item.toInt())) {
+                changed = true;
+              }
             }
           }
         }
-      }
 
-      if (updates['hasFiredWakeUpAlarm'] == true && !_hasFiredWakeUpAlarm) {
-        _hasFiredWakeUpAlarm = true;
-        changed = true;
-      }
-
-      final bgSource = (updates['lastTrackingSignalSource'] ?? '').toString().trim();
-      if (bgSource.isNotEmpty && bgSource != _lastTrackingSignalSource) {
-        _lastTrackingSignalSource = bgSource;
-        changed = true;
-      }
-
-      if (changed) {
-        _lastRideUpdateDateTime = DateTime.now();
-        await _saveActiveRideToBox();
-        notifyListeners();
-      }
-    } else if (bgMode == 'watch' && bgTrainId.isNotEmpty) {
-      final detectedTrack = (updates['detectedTrack'] ?? '').toString().trim();
-      final detectedStatus = (updates['detectedStatus'] ?? '').toString().trim();
-      if (detectedTrack.isNotEmpty) {
-        final idx = _upcomingTrains.indexWhere((t) => t.trainId == bgTrainId);
-        if (idx != -1) {
-          _upcomingTrains[idx] = _upcomingTrains[idx].copyWith(
-            track: detectedTrack,
-            status: detectedStatus.isNotEmpty
-                ? detectedStatus
-                : _upcomingTrains[idx].status,
-          );
+        if (updates['hasFiredWakeUpAlarm'] == true && !_hasFiredWakeUpAlarm) {
+          _hasFiredWakeUpAlarm = true;
+          changed = true;
         }
-        if (_watchedTrainId == bgTrainId) {
-          _clearWatchedTrain(notify: false);
+
+        final bgSource =
+            (updates['lastTrackingSignalSource'] ?? '').toString().trim();
+        if (bgSource.isNotEmpty && bgSource != _lastTrackingSignalSource) {
+          _lastTrackingSignalSource = bgSource;
+          changed = true;
         }
-        notifyListeners();
+
+        if (changed) {
+          _lastRideUpdateDateTime = DateTime.now();
+          await _saveActiveRideToBox();
+          notifyListeners();
+        }
+      } else if (bgMode == 'watch' && bgTrainId.isNotEmpty) {
+        final detectedTrack = (updates['detectedTrack'] ?? '').toString().trim();
+        final detectedStatus =
+            (updates['detectedStatus'] ?? '').toString().trim();
+        if (detectedTrack.isNotEmpty) {
+          final idx = _upcomingTrains.indexWhere((t) => t.trainId == bgTrainId);
+          if (idx != -1) {
+            _upcomingTrains[idx] = _upcomingTrains[idx].copyWith(
+              track: detectedTrack,
+              status: detectedStatus.isNotEmpty
+                  ? detectedStatus
+                  : _upcomingTrains[idx].status,
+            );
+          }
+          if (_watchedTrainId == bgTrainId) {
+            _clearWatchedTrain(notify: false);
+          }
+          notifyListeners();
+        }
       }
+    } catch (e) {
+      debugPrint('my5top syncFromBackgroundGuard error: $e');
     }
   }
 
@@ -1711,7 +1835,7 @@ class AppState extends ChangeNotifier {
       if (_rideLogs.length > 50) {
         _rideLogs = _rideLogs.sublist(0, 50);
       }
-      await _settingsBox.put(
+      await _boxPut(
         'ride_logs',
         _rideLogs.map((e) => e.toJson()).toList(),
       );
@@ -1722,7 +1846,7 @@ class AppState extends ChangeNotifier {
     _activeRideBoardedAt = null;
     _currentStopIndex = 0;
     _segmentProgress = 0.0;
-    await _settingsBox.delete('active_ride_state');
+    await _boxDelete('active_ride_state');
     await _syncBackgroundGuard();
     notifyListeners();
   }
@@ -1738,27 +1862,27 @@ class AppState extends ChangeNotifier {
 
   // --- MIHON-STYLE SAF / GOOGLE DRIVE JSON BACKUP & RESTORE ---
   String get safBackupDirectoryUri =>
-      _settingsBox.get('saf_backup_directory_uri', defaultValue: '') as String;
+      _readString('saf_backup_directory_uri', '');
 
   String get safBackupDirectoryLabel =>
-      _settingsBox.get('saf_backup_directory_label', defaultValue: '') as String;
+      _readString('saf_backup_directory_label', '');
 
   String get backupInterval =>
-      _settingsBox.get('backup_interval', defaultValue: 'off') as String;
+      _readString('backup_interval', 'off', allowEmpty: false);
 
   Future<void> setBackupInterval(String val) async {
-    await _settingsBox.put('backup_interval', val);
+    await _boxPut('backup_interval', val);
     notifyListeners();
   }
 
   DateTime? get lastBackupTime {
-    final timeStr = _settingsBox.get('last_backup_time') as String?;
+    final timeStr = _readNullableString('last_backup_time');
     if (timeStr == null) return null;
     return DateTime.tryParse(timeStr);
   }
 
   Future<void> setLastBackupTime(DateTime dt) async {
-    await _settingsBox.put('last_backup_time', dt.toIso8601String());
+    await _boxPut('last_backup_time', dt.toIso8601String());
     notifyListeners();
   }
 
@@ -1787,49 +1911,56 @@ class AppState extends ChangeNotifier {
   Future<void> importFromJson(Map<String, dynamic> json) async {
     if (json['animeThemeStyle'] != null) {
       _animeThemeStyle = json['animeThemeStyle'].toString();
-      await _settingsBox.put('anime_theme_style', _animeThemeStyle);
+      await _boxPut('anime_theme_style', _animeThemeStyle);
     }
     if (json['isDarkMode'] is bool) {
       _isDarkMode = json['isDarkMode'] as bool;
-      await _settingsBox.put('is_dark_mode', _isDarkMode);
+      await _boxPut('is_dark_mode', _isDarkMode);
     }
     if (json['isPureBlackDarkMode'] is bool) {
       _isPureBlackDarkMode = json['isPureBlackDarkMode'] as bool;
-      await _settingsBox.put('pure_black_dark_mode', _isPureBlackDarkMode);
+      await _boxPut('pure_black_dark_mode', _isPureBlackDarkMode);
     }
     if (json['workStationCode'] != null) {
       _workStationCode = json['workStationCode'].toString();
-      await _settingsBox.put('work_station_code', _workStationCode);
+      await _boxPut('work_station_code', _workStationCode);
     }
     if (json['homeStationCode'] != null) {
       _homeStationCode = json['homeStationCode'].toString();
-      await _settingsBox.put('home_station_code', _homeStationCode);
+      await _boxPut('home_station_code', _homeStationCode);
     }
     if (json['starredStationCodes'] is List) {
       _starredStationCodes = (json['starredStationCodes'] as List)
           .map((e) => e.toString())
           .toList();
-      await _settingsBox.put('starred_station_codes', _starredStationCodes);
+      await _boxPut('starred_station_codes', _starredStationCodes);
     }
     if (json['originStationCode'] != null &&
         json['destinationStationCode'] != null) {
       _originStationCode = json['originStationCode'].toString();
       _destinationStationCode = json['destinationStationCode'].toString();
-      await _settingsBox.put('origin_station_code', _originStationCode);
-      await _settingsBox.put('destination_station_code', _destinationStationCode);
+      await _boxPut('origin_station_code', _originStationCode);
+      await _boxPut('destination_station_code', _destinationStationCode);
     }
     if (json['notificationRules'] is Map) {
-      _notificationRules = NotificationRules.fromJson(
-        Map<String, dynamic>.from(json['notificationRules'] as Map),
-      );
-      await _saveNotificationRules();
+      try {
+        _notificationRules = NotificationRules.fromJson(
+          Map<String, dynamic>.from(json['notificationRules'] as Map),
+        );
+        await _saveNotificationRules();
+      } catch (_) {}
     }
     if (json['rideLogs'] is List) {
-      _rideLogs = (json['rideLogs'] as List)
-          .whereType<Map>()
-          .map((m) => RideLog.fromJson(Map<String, dynamic>.from(m)))
-          .toList();
-      await _settingsBox.put(
+      final parsedLogs = <RideLog>[];
+      for (final item in (json['rideLogs'] as List)) {
+        if (item is Map) {
+          try {
+            parsedLogs.add(RideLog.fromJson(Map<String, dynamic>.from(item)));
+          } catch (_) {}
+        }
+      }
+      _rideLogs = parsedLogs;
+      await _boxPut(
         'ride_logs',
         _rideLogs.map((e) => e.toJson()).toList(),
       );
@@ -1837,7 +1968,7 @@ class AppState extends ChangeNotifier {
     if (json['njtUsername'] != null &&
         json['njtUsername'].toString().isNotEmpty) {
       _njtUsername = json['njtUsername'].toString();
-      await _settingsBox.put('njt_username', _njtUsername);
+      await _boxPut('njt_username', _njtUsername);
     }
     if (json['githubRepoPath'] != null &&
         json['githubRepoPath'].toString().isNotEmpty) {
@@ -1857,8 +1988,8 @@ class AppState extends ChangeNotifier {
         if (map['success'] == true) {
           final uri = map['uri']?.toString() ?? '';
           final display = map['displayName']?.toString() ?? uri;
-          await _settingsBox.put('saf_backup_directory_uri', uri);
-          await _settingsBox.put('saf_backup_directory_label', display);
+          await _boxPut('saf_backup_directory_uri', uri);
+          await _boxPut('saf_backup_directory_label', display);
           notifyListeners();
         }
         return map;
@@ -2248,34 +2379,32 @@ class AppState extends ChangeNotifier {
   String get githubRepoPath => 'hsoj1092/my5top';
 
   Future<void> setGithubRepoPath(String path) async {
-    await _settingsBox.put('github_repo_path', 'hsoj1092/my5top');
+    await _boxPut('github_repo_path', 'hsoj1092/my5top');
     notifyListeners();
   }
 
-  String get githubToken =>
-      _settingsBox.get('github_token', defaultValue: '') as String;
+  String get githubToken => _readString('github_token', '');
 
   Future<void> setGithubToken(String token) async {
-    await _settingsBox.put('github_token', token.trim());
+    await _boxPut('github_token', token.trim());
     notifyListeners();
   }
 
-  String get skippedUpdateVersion =>
-      _settingsBox.get('skipped_update_version', defaultValue: '') as String;
+  String get skippedUpdateVersion => _readString('skipped_update_version', '');
 
   Future<void> setSkippedUpdateVersion(String version) async {
-    await _settingsBox.put('skipped_update_version', version);
+    await _boxPut('skipped_update_version', version);
     notifyListeners();
   }
 
   DateTime? get lastUpdateCheckTime {
-    final timeStr = _settingsBox.get('last_update_check_time') as String?;
+    final timeStr = _readNullableString('last_update_check_time');
     if (timeStr == null) return null;
     return DateTime.tryParse(timeStr);
   }
 
   Future<void> setLastUpdateCheckTime(DateTime dt) async {
-    await _settingsBox.put('last_update_check_time', dt.toIso8601String());
+    await _boxPut('last_update_check_time', dt.toIso8601String());
     notifyListeners();
   }
 

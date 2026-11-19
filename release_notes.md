@@ -1,4 +1,4 @@
-# v1.0.5 — 1-Second Track Watch Burst, Headphone Silent Bypass & Background Silent Guard 🚆🎧🛡️
+# v1.0.5 — 1-Second Track Watch Burst, Headphone Silent Bypass, Background Guard & Startup Fix 🚆🎧🛡️
 
 ### ✨ What's New in v1.0.5
 
@@ -16,3 +16,7 @@
 - **Accidental-Close Protection**: Once a ride or track watch is active, pressing Back silently moves the app to the background instead of closing, and a native Android Foreground Service keeps tracking even if the app is swiped away from Recents—continuing to deliver stop, arrival, and track notifications until your commute completes.
 - **Seamless State Sync**: Any stops passed or tracks announced while running silently in the background automatically sync back into the app when reopened.
 - **Battery-Safe Automatic Cutoffs**: Automatically shuts down **2 minutes** after reaching your destination stop, **20 minutes** past scheduled arrival ETA, after a **3-hour** hard ride cap (or **45-minute** / **15m-past-departure** track watch cap), plus a 1-tap **End Ride** / **Stop Watch** action button right on the persistent notification.
+
+#### 🔧 Startup Reliability & Infinite-Loading Fix
+- **Guaranteed Cold-Launch Completion**: Protected startup initialization with strict timeouts, `try/catch/finally` guarantees, and automatic recovery for corrupted local storage so the app can never get stuck on the loading spinner on launch.
+- **Non-Blocking Background Sync & Platform Calls**: Deferred background guard sync and permission requests until after the home screen loads, added timeouts to every Android platform channel and HTTP stream call, and hardened native `MainActivity` / foreground service lifecycle handlers against startup errors.

@@ -1045,6 +1045,67 @@ void main() {
         isFalse,
       );
     });
+
+    test(
+        'AppState recovers gracefully from corrupt/null Hive values and closed boxes without hanging startup',
+        () async {
+      final tempDir =
+          await Directory.systemTemp.createTemp('my5top_corrupt_startup_');
+      try {
+        Hive.init(tempDir.path);
+        final box = await Hive.openBox('my5top_corrupt_box');
+        await box.put('anime_theme_style', null);
+        await box.put('is_dark_mode', 'bad_bool');
+        await box.put('pure_black_dark_mode', 123);
+        await box.put('text_scale_factor', 'oops');
+        await box.put('dev_test_mode', 'nope');
+        await box.put('work_station_code', '');
+        await box.put('home_station_code', 42);
+        await box.put('starred_station_codes', [null, '', '  ']);
+        await box.put('origin_station_code', 99);
+        await box.put('destination_station_code', null);
+        await box.put('njt_username', 1234);
+        await box.put('cached_njt_token_time', 999);
+        await box.put('notification_rules', {
+          'startNotifyingStopsAway': 'bad_int',
+        });
+        await box.put('ride_logs', ['corrupt_entry', 12345]);
+        await box.put('active_ride_state', {'trip': 'corrupt_trip'});
+        await box.put('backup_interval', '');
+        await box.put('github_token', 555);
+
+        final state = await AppState.createForTesting(settingsBox: box);
+
+        expect(state.initialized, isTrue);
+        expect(state.animeThemeStyle, equals('mygo'));
+        expect(state.isDarkMode, isTrue);
+        expect(state.isPureBlackDarkMode, isFalse);
+        expect(state.textScaleFactor, equals(1.0));
+        expect(state.devTestMode, isFalse);
+        expect(state.workStationCode, equals('NY'));
+        expect(state.homeStationCode, equals('MP'));
+        expect(state.starredStationCodes, isNotEmpty);
+        expect(state.njtUsername, equals(''));
+        expect(state.notificationRules.startNotifyingStopsAway, equals(2));
+        expect(state.rideLogs, isEmpty);
+        expect(state.isRiding, isFalse);
+        expect(state.backupInterval, equals('off'));
+        expect(state.githubToken, equals(''));
+        expect(box.get('active_ride_state'), isNull);
+
+        // Even if the Hive box closes unexpectedly, getters/setters remain safe
+        await box.close();
+        expect(state.backupInterval, equals('off'));
+        expect(state.githubToken, equals(''));
+        await state.setDarkMode(false);
+        expect(state.isDarkMode, isFalse);
+      } finally {
+        await Hive.close();
+        if (await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+      }
+    });
   });
 }
 

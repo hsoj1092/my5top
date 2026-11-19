@@ -336,7 +336,8 @@ class NjtApiService {
             ..fields['password'] = password.trim();
           final streamed =
               await client.send(req).timeout(const Duration(seconds: 8));
-          final resp = await http.Response.fromStream(streamed);
+          final resp = await http.Response.fromStream(streamed)
+              .timeout(const Duration(seconds: 8));
           if (resp.statusCode == 200) {
             final decoded = json.decode(resp.body);
             if (decoded is Map && decoded['UserToken'] != null) {
@@ -1064,7 +1065,8 @@ class NjtApiService {
 
           final streamed =
               await client.send(req).timeout(const Duration(seconds: 8));
-          final resp = await http.Response.fromStream(streamed);
+          final resp = await http.Response.fromStream(streamed)
+              .timeout(const Duration(seconds: 8));
           if (resp.statusCode != 200) continue;
 
           final decoded = json.decode(resp.body);
