@@ -1134,6 +1134,7 @@ class AppState extends ChangeNotifier {
         _upcomingTrains = NjtApiService.generateSmartSchedule(
           originCode: reqOrigin,
           destinationCode: reqDest,
+          now: NjtApiService.easternNow(),
         );
         _lastScheduleRefresh = DateTime.now();
       }
