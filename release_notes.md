@@ -1,6 +1,12 @@
-# v1.0.5 — 1-Second Track Watch Burst, Headphone Silent Bypass, Background Guard & Startup Fix 🚆🎧🛡️
+# v1.0.5 — 1s Track Watch, Headphone Silent Bypass, Background Guard & 2-Part Precision Arrival Alerts 🚆🎧🛡️
 
 ### ✨ What's New in v1.0.5
+
+#### 🎯 2-Part Final Arrival Alerts & Precision Live ETA
+- **Part 1 — Approaching (~1 min out)**: Fires a crisp early-prep notification + double-pulse vibration roughly 1 minute before reaching your destination platform so you can pack up calmly.
+- **Part 2 — Arriving (~10s before stop)**: Triggers an urgent get-up alarm ~10 seconds *before* stopping at the platform so you never miss your stop.
+- **1Hz Adaptive GPS Braking Physics + Tunnel Calibration**: Automatically switches to 1-second precision GPS with Doppler speed and rail braking kinematics during final approach, anchors live delay offsets at cleared stops for GPS-blackout tunnels (like entering NY Penn), suppresses false alerts during red-signal holds, and hands off immediately when your screen locks.
+- **Live Active Ride Telemetry**: Displays a live ticking ETA countdown, delay-adjusted arrival time, live speed/signal status, and **1m Approaching** / **10s Arriving** armed badges.
 
 #### ⚡ 1-Second Track Watch Fast Polling Burst
 - **11-Minute Precision Window**: Watched trains automatically switch to a lightweight **1-second single-station DepartureVision poll** starting at the **11-minute mark** before scheduled departure so you get your track number the instant it posts.

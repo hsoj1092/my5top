@@ -171,6 +171,13 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onStop() {
+        try {
+            CommuteForegroundService.onUiDetached(applicationContext)
+        } catch (_: Throwable) {}
+        super.onStop()
+    }
+
     override fun onDestroy() {
         try {
             CommuteForegroundService.onUiDetached(applicationContext)

@@ -515,9 +515,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 _buildPreferenceTile(
                   context: context,
                   icon: Icons.alarm_rounded,
-                  title: 'Final wake-up arrival alarm',
+                  title: '2-Part final arrival alert',
                   subtitle:
-                      'High-priority sound + vibration when approaching destination',
+                      'Part 1: Approaching (~1 min out) + Part 2: Arriving (~10s before stop — get up!)',
                   trailing: Switch(
                     value: rules.finalWakeUpAlarm,
                     activeColor: pal.urgentColor,

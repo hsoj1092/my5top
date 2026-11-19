@@ -16,6 +16,7 @@ import '../models/notification_rules.dart';
 import '../models/ride_log.dart';
 import '../models/station.dart';
 import '../models/train_trip.dart';
+import '../services/arrival_eta_engine.dart';
 import '../services/njt_api_service.dart';
 import '../services/notification_service.dart';
 import '../theme/anime_theme.dart';
@@ -250,11 +251,17 @@ class AppState extends ChangeNotifier {
   String _lastTrackingSignalSource = 'Schedule + GPS Ready';
   DateTime _lastRideUpdateDateTime = DateTime.now();
   StreamSubscription<Position>? _gpsSubscription;
+  Timer? _rideEtaTimer;
   Timer? _simulationTimer;
   Timer? _postArrivalGuardStopTimer;
   bool _isAutoSimulating = false;
   final Set<int> _notifiedStopIndices = {};
+  bool _hasFiredApproachingAlert = false;
   bool _hasFiredWakeUpAlarm = false;
+  final ArrivalEtaEngine _etaEngine = ArrivalEtaEngine();
+  ArrivalEtaEstimate? _latestEtaEstimate;
+  bool _gpsPrecisionStreamActive = false;
+  DateTime? _lastOngoingNotifEtaSync;
 
   // Customizable Notification Rules
   NotificationRules _notificationRules = const NotificationRules();
@@ -352,6 +359,39 @@ class AppState extends ChangeNotifier {
   DateTime get lastRideUpdateDateTime => _lastRideUpdateDateTime;
   bool get isAutoSimulating => _isAutoSimulating;
 
+  ArrivalEtaEstimate? get latestEtaEstimate => _latestEtaEstimate;
+  int? get estimatedSecondsToDestination => _latestEtaEstimate?.roundedSeconds;
+  DateTime? get liveEstimatedArrivalEastern {
+    final epochMs = _latestEtaEstimate?.liveArrivalEpochMs;
+    if (epochMs != null) {
+      return NjtApiService.easternNow(
+        DateTime.fromMillisecondsSinceEpoch(epochMs, isUtc: true),
+      );
+    }
+    return _activeRideArrivalEastern;
+  }
+
+  String get liveEstimatedArrivalFormatted {
+    final live = liveEstimatedArrivalEastern;
+    if (live != null) return NjtApiService.formatTime12h(live);
+    return _activeRideTrain?.arrivalTime ?? '--';
+  }
+
+  double? get currentSpeedMph => _latestEtaEstimate?.speedMph;
+  String get liveEtaSourceLabel =>
+      _latestEtaEstimate?.sourceLabel ?? _lastTrackingSignalSource;
+  String get formattedEtaCountdown {
+    final secs = estimatedSecondsToDestination;
+    if (secs == null) return '--';
+    return ArrivalEtaEngine.formatCountdown(secs);
+  }
+
+  bool get hasFiredApproachingAlert => _hasFiredApproachingAlert;
+  bool get hasFiredArrivingAlert => _hasFiredWakeUpAlarm;
+  bool get isPrecisionTrackingActive =>
+      _gpsPrecisionStreamActive ||
+      (_latestEtaEstimate?.isPrecisionMode ?? false);
+
   NotificationRules get notificationRules => _notificationRules;
   List<RideLog> get rideLogs => _rideLogs;
 
@@ -425,10 +465,13 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
 
     if (_activeRideTrain != null) {
-      unawaited(_startGpsStream());
+      _evaluateLiveArrivalEta(notify: false);
+      _startRideEtaTicker();
+      unawaited(_startGpsStream(precision: stopsRemaining <= 1));
       try {
         await _syncBackgroundGuard();
       } catch (_) {}
+      notifyListeners();
     } else {
       try {
         await NotificationService.cancelRideProgress();
@@ -591,6 +634,8 @@ class AppState extends ChangeNotifier {
                 if (item is num) _notifiedStopIndices.add(item.toInt());
               }
             }
+            _hasFiredApproachingAlert =
+                rideMap['hasFiredApproachingAlert'] == true;
             _hasFiredWakeUpAlarm = rideMap['hasFiredWakeUpAlarm'] == true;
             _lastTrackingSignalSource =
                 (rideMap['lastTrackingSignalSource'] ?? 'Restored Active Ride')
@@ -601,6 +646,7 @@ class AppState extends ChangeNotifier {
                 ((rideMap['rideVariationIndex'] as num?)?.toInt() ?? 0) % 5;
             _lastRideUpdateDateTime = DateTime.now();
 
+            double? initialRouteDist;
             if (stops.length > 1) {
               final curr = stops[_currentStopIndex];
               final next =
@@ -610,7 +656,20 @@ class AppState extends ChangeNotifier {
                   .distanceMetersTo(next.latitude, next.longitude);
               _distanceToDestinationMeters = getStationByCode(curr.stationCode)
                   .distanceMetersTo(dest.latitude, dest.longitude);
+              initialRouteDist = ArrivalEtaEngine.haversineMeters(
+                stops.first.latitude,
+                stops.first.longitude,
+                dest.latitude,
+                dest.longitude,
+              );
             }
+            _etaEngine.reset(
+              initialRouteDistanceMeters: initialRouteDist,
+              rideStartedEpochMs: boardedAt.millisecondsSinceEpoch,
+              observedDelaySeconds:
+                  (rideMap['observedDelaySeconds'] as num?)?.toInt() ?? 0,
+              hasObservedStopAnchor: rideMap['hasObservedStopAnchor'] == true,
+            );
           }
         } else {
           await _boxDelete('active_ride_state');
@@ -1220,6 +1279,29 @@ class AppState extends ChangeNotifier {
   }
 
   // --- Active Ride & Hybrid GPS + API Engine ---
+  int _computeStopScheduledEpochMs(TrainStop stop, DateTime referenceEastern) {
+    final parsed =
+        NjtApiService.parseNjtTime(stop.estimatedTime, referenceEastern);
+    if (parsed == null) return 0;
+    return NjtApiService.easternWallClockToEpochMs(parsed);
+  }
+
+  void _startRideEtaTicker() {
+    _rideEtaTimer?.cancel();
+    _rideEtaTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_activeRideTrain == null) {
+        _stopRideEtaTicker();
+        return;
+      }
+      _evaluateLiveArrivalEta();
+    });
+  }
+
+  void _stopRideEtaTicker() {
+    _rideEtaTimer?.cancel();
+    _rideEtaTimer = null;
+  }
+
   Future<void> _saveActiveRideToBox() async {
     final trip = _activeRideTrain;
     if (trip == null) {
@@ -1233,7 +1315,10 @@ class AppState extends ChangeNotifier {
       'currentStopIndex': _currentStopIndex,
       'segmentProgress': _segmentProgress,
       'notifiedStopIndices': _notifiedStopIndices.toList(),
+      'hasFiredApproachingAlert': _hasFiredApproachingAlert,
       'hasFiredWakeUpAlarm': _hasFiredWakeUpAlarm,
+      'observedDelaySeconds': _etaEngine.observedDelaySeconds,
+      'hasObservedStopAnchor': _etaEngine.hasObservedStopAnchor,
       'lastTrackingSignalSource': _lastTrackingSignalSource,
       'rideSceneSeed': _rideSceneSeed,
       'rideVariationIndex': _rideVariationIndex,
@@ -1259,6 +1344,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> startRide(TrainTrip trip) async {
     stopAutoSimulate();
+    _stopRideEtaTicker();
     _postArrivalGuardStopTimer?.cancel();
     _postArrivalGuardStopTimer = null;
     final rng = math.Random();
@@ -1282,13 +1368,18 @@ class AppState extends ChangeNotifier {
     _currentStopIndex = initialStopIdx;
     _segmentProgress = trip.isRecentPastDeparture ? 0.35 : 0.0;
     _notifiedStopIndices.clear();
+    _hasFiredApproachingAlert = false;
     _hasFiredWakeUpAlarm = false;
+    _latestEtaEstimate = null;
+    _gpsPrecisionStreamActive = false;
+    _lastOngoingNotifEtaSync = null;
     _lastRideUpdateDateTime = DateTime.now();
     _lastTrackingSignalSource = trip.isRecentPastDeparture
         ? 'Joined en-route (${trip.status})'
         : 'Boarded at ${originStation.shortName}';
 
-    // Initialize distances from current station coordinates
+    // Initialize distances & reset multi-signal ETA engine
+    double? initialRouteDist;
     if (stops.length > 1) {
       final curr = stops[_currentStopIndex];
       final next = stops[(_currentStopIndex + 1).clamp(0, stops.length - 1)];
@@ -1297,11 +1388,23 @@ class AppState extends ChangeNotifier {
           .distanceMetersTo(next.latitude, next.longitude);
       _distanceToDestinationMeters = getStationByCode(curr.stationCode)
           .distanceMetersTo(dest.latitude, dest.longitude);
+      initialRouteDist = ArrivalEtaEngine.haversineMeters(
+        stops.first.latitude,
+        stops.first.longitude,
+        dest.latitude,
+        dest.longitude,
+      );
     }
+    _etaEngine.reset(
+      initialRouteDistanceMeters: initialRouteDist,
+      rideStartedEpochMs: _activeRideBoardedAt!.millisecondsSinceEpoch,
+    );
+    _evaluateLiveArrivalEta(notify: false);
+    _startRideEtaTicker();
 
     await _saveActiveRideToBox();
     notifyListeners();
-    await _startGpsStream();
+    await _startGpsStream(precision: stopsRemaining <= 1);
     await _syncBackgroundGuard();
 
     final isSakura = _animeThemeStyle == 'sakura';
@@ -1310,15 +1413,19 @@ class AppState extends ChangeNotifier {
       type: 'stop',
       title: '🚆 Boarded Train #${trip.trainId} → $destShort',
       body: isSakura
-          ? '♪ All aboard! $stopsRemaining stops to $destShort (ETA ${trip.arrivalTime}). Silent Guard active & alerting at ${_notificationRules.startNotifyingStopsAway} stops away~'
-          : '✦ Confirmed on Train #${trip.trainId} (${trip.track != null ? "Track ${trip.track}" : "NEC"}). $stopsRemaining stops to $destShort • ETA ${trip.arrivalTime}. Silent Guard ON.',
+          ? '♪ All aboard! $stopsRemaining stops to $destShort (ETA ${trip.arrivalTime}). 2-part final alerts (1m Approaching + 10s Arriving) armed~'
+          : '✦ Confirmed on Train #${trip.trainId} (${trip.track != null ? "Track ${trip.track}" : "NEC"}). $stopsRemaining stops to $destShort • ETA ${trip.arrivalTime}. 2-part final alerts ON.',
       vibrate: _notificationRules.vibrateOnAlerts,
       headphoneAudioBypass: false,
     );
   }
 
-  Future<void> _startGpsStream() async {
+  Future<void> _startGpsStream({bool precision = false}) async {
+    if (_gpsSubscription != null && _gpsPrecisionStreamActive == precision) {
+      return;
+    }
     await _gpsSubscription?.cancel();
+    _gpsSubscription = null;
     try {
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
@@ -1326,14 +1433,28 @@ class AppState extends ChangeNotifier {
       }
       if (perm == LocationPermission.always ||
           perm == LocationPermission.whileInUse) {
+        final LocationSettings settings = !kIsWeb && Platform.isAndroid
+            ? AndroidSettings(
+                accuracy: precision
+                    ? LocationAccuracy.bestForNavigation
+                    : LocationAccuracy.high,
+                distanceFilter: precision ? 0 : 25,
+                intervalDuration: Duration(seconds: precision ? 1 : 4),
+              )
+            : LocationSettings(
+                accuracy: precision
+                    ? LocationAccuracy.bestForNavigation
+                    : LocationAccuracy.high,
+                distanceFilter: precision ? 0 : 25,
+              );
+        _gpsPrecisionStreamActive = precision;
         _gpsSubscription = Geolocator.getPositionStream(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            distanceFilter: 35,
-          ),
+          locationSettings: settings,
         ).listen(_onGpsPositionUpdate);
       }
-    } catch (_) {}
+    } catch (_) {
+      _gpsPrecisionStreamActive = false;
+    }
   }
 
   void _onGpsPositionUpdate(Position pos) {
@@ -1351,8 +1472,10 @@ class AppState extends ChangeNotifier {
     _distanceToDestinationMeters = getStationByCode(destStop.stationCode)
         .distanceMetersTo(pos.latitude, pos.longitude);
 
-    // Check proximity to each stop ahead of _currentStopIndex
-    for (int i = _currentStopIndex + 1; i < stops.length; i++) {
+    // Check proximity to INTERMEDIATE stops only at gpsStationRadiusMeters.
+    // The final destination stop is handled by the precision 2-stage ETA engine
+    // so we trigger Approaching (~1m) & Arriving (~10s) BEFORE stopping!
+    for (int i = _currentStopIndex + 1; i < stops.length - 1; i++) {
       final st = stops[i];
       final dist = getStationByCode(st.stationCode)
           .distanceMetersTo(pos.latitude, pos.longitude);
@@ -1365,7 +1488,9 @@ class AppState extends ChangeNotifier {
     // Update segment progress & distance to next stop
     final nextStop = nextUpcomingStop;
     final currStop = currentOrLastPassedStop;
-    if (nextStop != null && currStop != null && _currentStopIndex < stops.length - 1) {
+    if (nextStop != null &&
+        currStop != null &&
+        _currentStopIndex < stops.length - 1) {
       final dNext = getStationByCode(nextStop.stationCode)
           .distanceMetersTo(pos.latitude, pos.longitude);
       final dTotal = getStationByCode(currStop.stationCode)
@@ -1379,23 +1504,108 @@ class AppState extends ChangeNotifier {
       _segmentProgress = 1.0;
     }
 
-    // Check final wake-up distance alarm if approaching destination
-    if (_notificationRules.finalWakeUpAlarm &&
-        !_hasFiredWakeUpAlarm &&
-        _distanceToDestinationMeters != null &&
-        _distanceToDestinationMeters! <= 950 &&
-        stopsRemaining <= 1) {
-      _hasFiredWakeUpAlarm = true;
-      final destShort =
-          getStationByCode(_activeRideTrain!.destinationCode).shortName;
-      _fireArrivalWakeUpAlert(
-        reason: 'Within ${_distanceToDestinationMeters!.toInt()}m of $destShort',
-      );
-      _syncBackgroundGuard();
-    }
+    // Feed live GPS + Doppler telemetry into the kinematic braking ETA engine
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final fixTimeMs = pos.timestamp.millisecondsSinceEpoch;
+    final safeTimestampMs =
+        (nowMs - fixTimeMs).abs() <= 60000 ? fixTimeMs : nowMs;
+    _etaEngine.recordGpsFix(
+      GpsTelemetrySample(
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        speedMps: pos.speed.isFinite && pos.speed >= 0 ? pos.speed : 0.0,
+        accuracyMeters: pos.accuracy.isFinite ? pos.accuracy : 50.0,
+        timestampEpochMs: safeTimestampMs,
+      ),
+      destLat: destStop.latitude,
+      destLng: destStop.longitude,
+      stopsRemaining: stopsRemaining,
+    );
 
+    _evaluateLiveArrivalEta(notify: false);
     _saveActiveRideToBox();
     notifyListeners();
+  }
+
+  void _evaluateLiveArrivalEta({bool notify = true}) {
+    final trip = _activeRideTrain;
+    if (trip == null) return;
+
+    final now = DateTime.now();
+    final nowMs = now.millisecondsSinceEpoch;
+    final arrivalEast = _activeRideArrivalEastern ??
+        computeTripArrivalEastern(trip);
+    final schedArrivalEpochMs =
+        NjtApiService.easternWallClockToEpochMs(arrivalEast);
+
+    final est = _etaEngine.evaluate(
+      nowEpochMs: nowMs,
+      scheduledArrivalEpochMs: schedArrivalEpochMs,
+      stopsRemaining: stopsRemaining,
+      apiStatus: trip.status,
+      finalWakeUpAlarmEnabled: _notificationRules.finalWakeUpAlarm,
+      hasFiredApproaching: _hasFiredApproachingAlert,
+      hasFiredArriving: _hasFiredWakeUpAlarm,
+      fallbackDistanceMeters: _distanceToDestinationMeters,
+    );
+
+    _latestEtaEstimate = est;
+    if (est.distanceMeters != null) {
+      _distanceToDestinationMeters = est.distanceMeters;
+    }
+
+    // Auto-upgrade foreground GPS stream to 1Hz bestForNavigation in Final Approach
+    if (est.isPrecisionMode &&
+        !_gpsPrecisionStreamActive &&
+        stopsRemaining > 0) {
+      unawaited(_startGpsStream(precision: true));
+    }
+
+    bool stateChanged = false;
+    final destShort = getStationByCode(trip.destinationCode).shortName;
+
+    if (est.shouldFireApproaching) {
+      _hasFiredApproachingAlert = true;
+      stateChanged = true;
+      unawaited(_fireApproachingAlert(est));
+    }
+
+    if (est.shouldFireArriving) {
+      _hasFiredWakeUpAlarm = true;
+      stateChanged = true;
+      final reason = est.isGpsFresh && est.distanceMeters != null
+          ? '~${(est.roundedSeconds ?? 10) <= 2 ? "Arriving" : "${est.roundedSeconds}s"} • ${est.distanceMeters!.round()}m to $destShort'
+          : '~10s to $destShort (${est.sourceLabel})';
+      unawaited(_fireArrivalWakeUpAlert(reason: reason));
+    }
+
+    if (est.shouldMarkPlatformArrived) {
+      final stops = activeCommuteStops;
+      if (stops.isNotEmpty) {
+        unawaited(
+          _advanceToStopIndex(
+            stops.length - 1,
+            source: 'Live GPS Platform (${est.distanceMeters!.round()}m)',
+          ),
+        );
+      }
+    }
+
+    if (stateChanged) {
+      unawaited(_saveActiveRideToBox());
+      unawaited(_syncBackgroundGuard());
+    } else if (_isAppFocused &&
+        est.isPrecisionMode &&
+        stopsRemaining > 0 &&
+        (_lastOngoingNotifEtaSync == null ||
+            now.difference(_lastOngoingNotifEtaSync!).inSeconds >= 10)) {
+      _lastOngoingNotifEtaSync = now;
+      unawaited(_syncBackgroundGuard());
+    }
+
+    if (notify) {
+      notifyListeners();
+    }
   }
 
   void _syncActiveRideFromApi(TrainTrip freshTrip) {
@@ -1421,6 +1631,7 @@ class AppState extends ChangeNotifier {
     if (highestDepartedIdx > _currentStopIndex) {
       _advanceToStopIndex(highestDepartedIdx, source: 'NJT Live API Feed');
     } else {
+      _evaluateLiveArrivalEta(notify: false);
       _saveActiveRideToBox();
       if (_activeRideTrain!.track != prevTrip.track ||
           _activeRideTrain!.status != prevTrip.status ||
@@ -1441,6 +1652,21 @@ class AppState extends ChangeNotifier {
     _lastTrackingSignalSource = source;
     _lastRideUpdateDateTime = DateTime.now();
 
+    // Anchor live delay offset when clearing a real intermediate stop
+    // (critical for GPS-blackout tunnels like Hudson River Tunnels -> NY Penn!)
+    if (!source.startsWith('Simulated') && _activeRideTrain != null) {
+      final depRef = _activeRideTrain!.departureDateTime ??
+          _activeRideArrivalEastern ??
+          NjtApiService.easternNow();
+      final schedStopMs = _computeStopScheduledEpochMs(stops[clamped], depRef);
+      if (schedStopMs > 0) {
+        _etaEngine.recordStopPassed(
+          actualEpochMs: DateTime.now().millisecondsSinceEpoch,
+          scheduledStopEpochMs: schedStopMs,
+        );
+      }
+    }
+
     // Update synthetic distances when advancing stops
     final currentSt = stops[_currentStopIndex];
     final destSt = stops.last;
@@ -1455,6 +1681,14 @@ class AppState extends ChangeNotifier {
       _segmentProgress = 1.0;
     }
 
+    if (stopsRemaining == 1 && !_gpsPrecisionStreamActive) {
+      unawaited(_startGpsStream(precision: true));
+    } else if (stopsRemaining == 0) {
+      _stopRideEtaTicker();
+      _gpsPrecisionStreamActive = false;
+    }
+
+    _evaluateLiveArrivalEta(notify: false);
     notifyListeners();
     await _evaluateStopNotifications(clamped, source: source);
     await _saveActiveRideToBox();
@@ -1487,7 +1721,7 @@ class AppState extends ChangeNotifier {
 
     // Case 1: Arrived at destination (0 stops remaining)
     if (rem == 0) {
-      if (!_hasFiredWakeUpAlarm) {
+      if (_notificationRules.finalWakeUpAlarm && !_hasFiredWakeUpAlarm) {
         _hasFiredWakeUpAlarm = true;
         await _fireArrivalWakeUpAlert(
           reason: 'Arrived at $destShort!',
@@ -1504,14 +1738,14 @@ class AppState extends ChangeNotifier {
           : '🔔 $rem Stops Away from $destShort!';
       final body = isOneStopAway
           ? (isSakura
-              ? '★ Passing ${currentStop.stationName}! $destShort is NEXT (ETA ${_activeRideTrain?.arrivalTime})! Pack up & head to the doors~ ♪'
-              : '⚡ Passed ${currentStop.stationName}. $destShort is the NEXT stop (ETA ${_activeRideTrain?.arrivalTime}). Time to stand up!')
+              ? '★ Passing ${currentStop.stationName}! $destShort is NEXT (ETA $liveEstimatedArrivalFormatted)! Approaching (~1m) & Arriving (~10s) alerts armed~ ♪'
+              : '⚡ Passed ${currentStop.stationName}. $destShort is NEXT (ETA $liveEstimatedArrivalFormatted). Approaching (~1m) & Arriving (~10s) alerts armed!')
           : (isSakura
-              ? '✿ Now at ${currentStop.stationName} • Only $rem stops left until $destShort (ETA ${_activeRideTrain?.arrivalTime})~!'
-              : '✦ Cleared ${currentStop.stationName} ($source). $rem stops left to $destShort • ETA ${_activeRideTrain?.arrivalTime}.');
+              ? '✿ Now at ${currentStop.stationName} • Only $rem stops left until $destShort (ETA $liveEstimatedArrivalFormatted)~!'
+              : '✦ Cleared ${currentStop.stationName} ($source). $rem stops left to $destShort • ETA $liveEstimatedArrivalFormatted.');
 
       await NotificationService.showCommuteAlert(
-        type: isOneStopAway ? 'arrival' : 'stop',
+        type: 'stop',
         title: title,
         body: body,
         vibrate: _notificationRules.vibrateOnAlerts,
@@ -1526,11 +1760,34 @@ class AppState extends ChangeNotifier {
         type: 'stop',
         title: '🚉 Passed ${currentStop.stationName} ($rem stops left)',
         body:
-            'Next stop: ${nextUpcomingStop?.stationName ?? destShort} • Destination ETA: ${_activeRideTrain?.arrivalTime}',
+            'Next stop: ${nextUpcomingStop?.stationName ?? destShort} • Destination ETA: $liveEstimatedArrivalFormatted',
         vibrate: _notificationRules.vibrateOnAlerts,
         headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
       );
     }
+  }
+
+  Future<void> _fireApproachingAlert(ArrivalEtaEstimate estimate) async {
+    final isSakura = _animeThemeStyle == 'sakura';
+    final destShort = _activeRideTrain != null
+        ? getStationByCode(_activeRideTrain!.destinationCode).shortName
+        : destinationStation.shortName;
+    final secs = (estimate.roundedSeconds ?? 60).clamp(15, 90);
+    final etaLabel = ArrivalEtaEngine.formatCountdown(secs);
+    final distDesc = estimate.distanceMeters != null
+        ? (estimate.distanceMeters! >= 1000.0
+            ? '${(estimate.distanceMeters! / 1609.34).toStringAsFixed(1)} mi out'
+            : '${estimate.distanceMeters!.round()}m out')
+        : 'Live ETA';
+    await NotificationService.showCommuteAlert(
+      type: 'approaching',
+      title: '⏳ APPROACHING ${destShort.toUpperCase()} (~$etaLabel)',
+      body: isSakura
+          ? '★ ~$etaLabel ($distDesc) to $destShort! Pack up your bag & get ready to stand up~ ♪'
+          : '✦ ~$etaLabel ($distDesc) to $destShort. Gather your things — final Arriving alert fires at ~10s!',
+      vibrate: _notificationRules.vibrateOnAlerts,
+      headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
+    );
   }
 
   Future<void> _fireArrivalWakeUpAlert({required String reason}) async {
@@ -1540,12 +1797,48 @@ class AppState extends ChangeNotifier {
         : destinationStation.shortName;
     await NotificationService.showCommuteAlert(
       type: 'arrival',
-      title: '🎉 ARRIVING AT ${destShort.toUpperCase()}!',
+      title: '🚨 ARRIVING AT ${destShort.toUpperCase()} NOW!',
       body: isSakura
-          ? '★ $reason! Check your seat for your phone, headphones & bag before stepping off~ ♪'
-          : '⚡ $reason! Grab your bag and step onto the platform safely.',
+          ? '★ $reason! Stand up NOW & head to the doors — check your seat before stepping off~ ♪'
+          : '⚡ $reason! GET UP NOW and head to the doors at $destShort!',
       vibrate: true,
       headphoneAudioBypass: _notificationRules.headphoneAudioBypass,
+    );
+  }
+
+  /// Dev Test Mode helper to preview Stage 1 ("Approaching", ~1 min out).
+  Future<void> simulateApproachingAlert() async {
+    _hasFiredApproachingAlert = true;
+    notifyListeners();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    await _fireApproachingAlert(
+      ArrivalEtaEstimate(
+        estimatedSeconds: 58.0,
+        distanceMeters: 1180.0,
+        closingSpeedMps: 24.0,
+        speedMph: 54.0,
+        delayOffsetSeconds: 0,
+        liveArrivalEpochMs: nowMs + 58000,
+        isGpsFresh: true,
+        isHoldingAtSignal: false,
+        isPrecisionMode: true,
+        sourceLabel: 'GPS Physics • 54 mph',
+        shouldFireApproaching: true,
+        shouldFireArriving: false,
+        shouldMarkPlatformArrived: false,
+      ),
+    );
+  }
+
+  /// Dev Test Mode helper to preview Stage 2 ("Arriving", ~10s before stop).
+  Future<void> simulateArrivingAlert() async {
+    _hasFiredWakeUpAlarm = true;
+    notifyListeners();
+    final destShort = _activeRideTrain != null
+        ? getStationByCode(_activeRideTrain!.destinationCode).shortName
+        : destinationStation.shortName;
+    await _fireArrivalWakeUpAlert(
+      reason: '~10s • 160m to $destShort (Test)',
     );
   }
 
@@ -1568,16 +1861,43 @@ class AppState extends ChangeNotifier {
       final arrivalEast = _activeRideArrivalEastern ??
           computeTripArrivalEastern(rideTrip);
       final depEast = rideTrip.departureDateTime;
+      final depRef = depEast ?? arrivalEast;
 
+      final etaSec = estimatedSecondsToDestination;
       final notifTitle = rem == 0
           ? 'Arrived at ${destSt.shortName}! • Train #${rideTrip.trainId}'
           : 'Train #${rideTrip.trainId} → ${destSt.shortName} ($rem ${rem == 1 ? "stop" : "stops"} away)';
-      final notifBody = rem == 0
-          ? 'Commute complete! Auto-stopping soon to save battery.'
-          : 'At/Passed: $currName • Next: $nextName • ETA ${rideTrip.arrivalTime}';
-      final notifSubText = rideTrip.track != null
-          ? 'Track ${rideTrip.track} • Guard ON'
-          : 'my5top Guard';
+      final String notifBody;
+      if (rem == 0) {
+        notifBody = 'Commute complete! Auto-stopping soon to save battery.';
+      } else if (_hasFiredWakeUpAlarm) {
+        notifBody =
+            '🚨 ARRIVING NOW at ${destSt.shortName}! Stand up & head to the doors';
+      } else if (_hasFiredApproachingAlert && etaSec != null) {
+        notifBody =
+            '⏳ Approaching ${destSt.shortName} (~${ArrivalEtaEngine.formatCountdown(etaSec)}) • Final alert at ~10s';
+      } else if (etaSec != null) {
+        notifBody =
+            'Next: $nextName • ETA ~${ArrivalEtaEngine.formatCountdown(etaSec)} ($liveEstimatedArrivalFormatted)';
+      } else {
+        notifBody =
+            'At/Passed: $currName • Next: $nextName • ETA ${rideTrip.arrivalTime}';
+      }
+
+      final trackPrefix =
+          rideTrip.track != null ? 'Track ${rideTrip.track} • ' : '';
+      final notifSubText = isPrecisionTrackingActive
+          ? '${trackPrefix}⚡ 1Hz Precision'
+          : '${trackPrefix}Guard ON';
+
+      final initialRouteDist = stops.length >= 2
+          ? ArrivalEtaEngine.haversineMeters(
+              stops.first.latitude,
+              stops.first.longitude,
+              stops.last.latitude,
+              stops.last.longitude,
+            )
+          : 0.0;
 
       final payload = <String, dynamic>{
         'mode': 'ride',
@@ -1599,7 +1919,11 @@ class AppState extends ChangeNotifier {
         'status': rideTrip.status,
         'currentStopIndex': _currentStopIndex,
         'notifiedStopIndices': _notifiedStopIndices.toList(),
+        'hasFiredApproachingAlert': _hasFiredApproachingAlert,
         'hasFiredWakeUpAlarm': _hasFiredWakeUpAlarm,
+        'observedDelaySeconds': _etaEngine.observedDelaySeconds,
+        'hasObservedStopAnchor': _etaEngine.hasObservedStopAnchor,
+        'initialRouteDistanceMeters': initialRouteDist,
         'stops': stops
             .map((s) => {
                   'stationCode': s.stationCode,
@@ -1607,6 +1931,7 @@ class AppState extends ChangeNotifier {
                   'latitude': s.latitude,
                   'longitude': s.longitude,
                   'estimatedTime': s.estimatedTime,
+                  'scheduledEpochMs': _computeStopScheduledEpochMs(s, depRef),
                 })
             .toList(),
         'rules': _notificationRules.toJson(),
@@ -1651,6 +1976,7 @@ class AppState extends ChangeNotifier {
         'status': watched.status,
         'currentStopIndex': 0,
         'notifiedStopIndices': <int>[],
+        'hasFiredApproachingAlert': false,
         'hasFiredWakeUpAlarm': false,
         'stops': <Map<String, dynamic>>[],
         'rules': _notificationRules.toJson(),
@@ -1721,8 +2047,21 @@ class AppState extends ChangeNotifier {
           }
         }
 
+        if (updates['hasFiredApproachingAlert'] == true &&
+            !_hasFiredApproachingAlert) {
+          _hasFiredApproachingAlert = true;
+          changed = true;
+        }
+
         if (updates['hasFiredWakeUpAlarm'] == true && !_hasFiredWakeUpAlarm) {
           _hasFiredWakeUpAlarm = true;
+          changed = true;
+        }
+
+        if (updates['hasObservedStopAnchor'] == true) {
+          final bgDelay =
+              (updates['observedDelaySeconds'] as num?)?.toInt() ?? 0;
+          _etaEngine.applySyncedDelayOffset(bgDelay, hasAnchor: true);
           changed = true;
         }
 
@@ -1735,6 +2074,7 @@ class AppState extends ChangeNotifier {
 
         if (changed) {
           _lastRideUpdateDateTime = DateTime.now();
+          _evaluateLiveArrivalEta(notify: false);
           await _saveActiveRideToBox();
           notifyListeners();
         }
@@ -1809,10 +2149,12 @@ class AppState extends ChangeNotifier {
 
   Future<void> completeOrCancelRide({bool saveToHistory = true}) async {
     stopAutoSimulate();
+    _stopRideEtaTicker();
     _postArrivalGuardStopTimer?.cancel();
     _postArrivalGuardStopTimer = null;
     await _gpsSubscription?.cancel();
     _gpsSubscription = null;
+    _gpsPrecisionStreamActive = false;
 
     final trip = _activeRideTrain;
     if (trip != null && saveToHistory) {
@@ -1847,6 +2189,11 @@ class AppState extends ChangeNotifier {
     _activeRideBoardedAt = null;
     _currentStopIndex = 0;
     _segmentProgress = 0.0;
+    _hasFiredApproachingAlert = false;
+    _hasFiredWakeUpAlarm = false;
+    _latestEtaEstimate = null;
+    _lastOngoingNotifEtaSync = null;
+    _etaEngine.reset();
     await _boxDelete('active_ride_state');
     await _syncBackgroundGuard();
     notifyListeners();
@@ -1855,6 +2202,7 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     _schedulePollTimer?.cancel();
+    _rideEtaTimer?.cancel();
     _simulationTimer?.cancel();
     _postArrivalGuardStopTimer?.cancel();
     _gpsSubscription?.cancel();

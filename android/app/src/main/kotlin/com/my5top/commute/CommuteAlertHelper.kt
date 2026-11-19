@@ -253,7 +253,7 @@ object CommuteAlertHelper {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val channelId = when (type) {
                 "track" -> CHANNEL_TRACK_ALERT
-                "arrival" -> CHANNEL_ARRIVAL_ALARM
+                "arrival", "approaching" -> CHANNEL_ARRIVAL_ALARM
                 else -> CHANNEL_STOP_ALERT
             }
 
@@ -313,7 +313,11 @@ object CommuteAlertHelper {
             RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         } ?: return
 
-        val maxDurationMs = if (type == "arrival") 3600L else 2400L
+        val maxDurationMs = when (type) {
+            "arrival" -> 3800L
+            "approaching" -> 2600L
+            else -> 2400L
+        }
 
         mainHandler.post {
             synchronized(audioLock) {
@@ -455,6 +459,7 @@ object CommuteAlertHelper {
         try {
             val pattern = when (type) {
                 "arrival" -> longArrayOf(0, 400, 150, 400, 150, 600)
+                "approaching" -> longArrayOf(0, 260, 120, 320)
                 "track" -> longArrayOf(0, 250, 120, 350)
                 else -> longArrayOf(0, 180, 100, 180)
             }

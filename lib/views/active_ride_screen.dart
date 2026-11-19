@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/app_state.dart';
 import '../services/njt_api_service.dart';
+import '../theme/anime_theme.dart';
 import '../widgets/animated_train_timeline.dart';
 import '../widgets/anime_mascot_banner.dart';
 
@@ -64,10 +65,23 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
         final rules = appState.notificationRules;
         final nextStop = appState.nextUpcomingStop;
         final distDestMeters = appState.distanceToDestinationMeters;
-        final isUrgent = rem <= rules.startNotifyingStopsAway;
+        final etaSec = appState.estimatedSecondsToDestination;
+        final isUrgent = rem <= rules.startNotifyingStopsAway ||
+            appState.hasFiredApproachingAlert ||
+            appState.hasFiredArrivingAlert;
         final lastUpdatedStamp = NjtApiService.formatDateAndTimeHms(
           appState.lastRideUpdateDateTime,
         );
+        final distLabel = distDestMeters != null
+            ? (distDestMeters >= 1000.0
+                ? '${(distDestMeters / 1609.34).toStringAsFixed(1)} mi'
+                : '${distDestMeters.round()}m')
+            : null;
+        final etaHeadline = rem == 0
+            ? 'Arrived (${appState.liveEstimatedArrivalFormatted})'
+            : (etaSec != null
+                ? 'ETA ~${appState.formattedEtaCountdown} (${appState.liveEstimatedArrivalFormatted})'
+                : 'ETA ${trip.arrivalTime} at ${appState.destinationStation.shortName}');
 
         final mascotMsg = pal.mascotLineForState(
           isRiding: true,
@@ -243,15 +257,17 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                       Icon(
                                         Icons.schedule_rounded,
                                         size: 15,
-                                        color: pal.primaryAccent,
+                                        color: isUrgent
+                                            ? pal.urgentColor
+                                            : pal.primaryAccent,
                                       ),
                                       const SizedBox(width: 5),
                                       Expanded(
                                         child: Text(
-                                          'ETA ${trip.arrivalTime} at ${appState.destinationStation.shortName}',
+                                          etaHeadline,
                                           style: TextStyle(
                                             fontSize: 13.5,
-                                            fontWeight: FontWeight.w700,
+                                            fontWeight: FontWeight.w800,
                                             color: pal.textPrimary,
                                           ),
                                           overflow: TextOverflow.ellipsis,
@@ -263,16 +279,19 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                   Row(
                                     children: [
                                       Icon(
-                                        Icons.gps_fixed_rounded,
+                                        appState.latestEtaEstimate?.isGpsFresh ==
+                                                true
+                                            ? Icons.gps_fixed_rounded
+                                            : Icons.sensors_rounded,
                                         size: 14,
                                         color: pal.successColor,
                                       ),
                                       const SizedBox(width: 5),
                                       Expanded(
                                         child: Text(
-                                          distDestMeters != null
-                                              ? '${(distDestMeters / 1609.34).toStringAsFixed(1)} mi to ${appState.destinationStation.code} • ${appState.lastTrackingSignalSource}'
-                                              : appState.lastTrackingSignalSource,
+                                          distLabel != null
+                                              ? '$distLabel to ${appState.destinationStation.code} • ${appState.liveEtaSourceLabel}'
+                                              : appState.liveEtaSourceLabel,
                                           style: TextStyle(
                                             fontSize: 11.5,
                                             color: pal.textSecondary,
@@ -287,7 +306,48 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                             ),
                           ],
                         ),
-                        const SizedBox(height: 14),
+                        const SizedBox(height: 12),
+                        // 2-Part Final Arrival Alert Status Strip
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildFinalAlertStagePill(
+                                pal: pal,
+                                icon: appState.hasFiredApproachingAlert
+                                    ? Icons.check_circle_rounded
+                                    : Icons.hourglass_bottom_rounded,
+                                label: '1m Approaching',
+                                statusText: !rules.finalWakeUpAlarm
+                                    ? 'OFF'
+                                    : (appState.hasFiredApproachingAlert
+                                        ? 'ALERTED'
+                                        : 'ARMED'),
+                                fired: appState.hasFiredApproachingAlert,
+                                enabled: rules.finalWakeUpAlarm,
+                                activeColor: pal.primaryAccent,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _buildFinalAlertStagePill(
+                                pal: pal,
+                                icon: appState.hasFiredArrivingAlert
+                                    ? Icons.check_circle_rounded
+                                    : Icons.alarm_on_rounded,
+                                label: '10s Arriving',
+                                statusText: !rules.finalWakeUpAlarm
+                                    ? 'OFF'
+                                    : (appState.hasFiredArrivingAlert
+                                        ? 'ALERTED'
+                                        : 'ARMED'),
+                                fired: appState.hasFiredArrivingAlert,
+                                enabled: rules.finalWakeUpAlarm,
+                                activeColor: pal.urgentColor,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
                         // Accuracy Timestamp + Next Poll Countdown + Alert Threshold Bar
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -344,20 +404,28 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                               Row(
                                 children: [
                                   Icon(
-                                    Icons.shield_rounded,
+                                    appState.isPrecisionTrackingActive
+                                        ? Icons.bolt_rounded
+                                        : Icons.shield_rounded,
                                     size: 13,
-                                    color: pal.primaryAccent,
+                                    color: appState.isPrecisionTrackingActive
+                                        ? pal.successColor
+                                        : pal.primaryAccent,
                                   ),
                                   const SizedBox(width: 5),
                                   Expanded(
                                     child: Text(
                                       rem == 0
                                           ? 'Silent Guard: Arrived • Auto-stopping in 2m to save battery'
-                                          : 'Silent Guard ON • Runs safely in background until ${appState.destinationStation.shortName}',
+                                          : (appState.isPrecisionTrackingActive
+                                              ? '1Hz Precision Approach + Silent Guard ON until ${appState.destinationStation.shortName}'
+                                              : 'Silent Guard ON • Runs safely in background until ${appState.destinationStation.shortName}'),
                                       style: TextStyle(
                                         fontSize: 10.8,
                                         fontWeight: FontWeight.w700,
-                                        color: pal.primaryAccent,
+                                        color: appState.isPrecisionTrackingActive
+                                            ? pal.successColor
+                                            : pal.primaryAccent,
                                       ),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
@@ -421,7 +489,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'Step through stops to test live notifications & diorama speed changes',
+                            'Step through stops or preview both 2-part final arrival alerts',
                             style: TextStyle(
                               fontSize: 11.5,
                               color: pal.textSecondary,
@@ -478,6 +546,58 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                     appState.isAutoSimulating
                                         ? 'Pause Sim'
                                         : 'Auto-Play Ride',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () =>
+                                      appState.simulateApproachingAlert(),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 9,
+                                    ),
+                                  ),
+                                  icon: const Icon(
+                                    Icons.hourglass_bottom_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text(
+                                    'Test 1m Alert',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () =>
+                                      appState.simulateArrivingAlert(),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: pal.urgentColor,
+                                    side: BorderSide(
+                                      color: pal.urgentColor.withOpacity(0.6),
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 9,
+                                    ),
+                                  ),
+                                  icon: const Icon(
+                                    Icons.alarm_on_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text(
+                                    'Test 10s Alert',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                   ),
@@ -549,7 +669,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                       ),
                                       const SizedBox(height: 2),
                                       Text(
-                                        'Alert ≤ ${rules.startNotifyingStopsAway} ${rules.startNotifyingStopsAway == 1 ? "stop" : "stops"} away • Every stop: ${rules.notifyEveryStop ? "ON" : "OFF"} • Wake-up: ${rules.finalWakeUpAlarm ? "ON" : "OFF"}',
+                                        'Alert ≤ ${rules.startNotifyingStopsAway} ${rules.startNotifyingStopsAway == 1 ? "stop" : "stops"} away • Every stop: ${rules.notifyEveryStop ? "ON" : "OFF"} • 2-Part Final: ${rules.finalWakeUpAlarm ? "ON" : "OFF"}',
                                         style: TextStyle(
                                           fontSize: 11.5,
                                           color: pal.textSecondary,
@@ -686,7 +806,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                   SwitchListTile(
                                     contentPadding: EdgeInsets.zero,
                                     title: Text(
-                                      'Final Wake-Up Arrival Alarm',
+                                      '2-Part Final Arrival Alert',
                                       style: TextStyle(
                                         fontSize: 14,
                                         fontWeight: FontWeight.w700,
@@ -694,7 +814,7 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
                                       ),
                                     ),
                                     subtitle: Text(
-                                      'High-priority alarm + vibration when approaching ${appState.destinationStation.shortName}',
+                                      'Part 1: Approaching (~1m before ${appState.destinationStation.shortName}) + Part 2: Arriving (~10s before stop — get up!)',
                                       style: TextStyle(
                                         fontSize: 12,
                                         color: pal.textSecondary,
@@ -791,6 +911,66 @@ class _ActiveRideScreenState extends State<ActiveRideScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildFinalAlertStagePill({
+    required AnimeThemePalette pal,
+    required IconData icon,
+    required String label,
+    required String statusText,
+    required bool fired,
+    required bool enabled,
+    required Color activeColor,
+  }) {
+    final accent = !enabled
+        ? pal.textSecondary
+        : (fired ? pal.successColor : activeColor);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: accent.withOpacity(fired ? 0.18 : 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: accent.withOpacity(fired ? 0.75 : 0.35),
+          width: 1.1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 14, color: accent),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w800,
+                    color: pal.textPrimary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w900,
+                    color: accent,
+                    letterSpacing: 0.4,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

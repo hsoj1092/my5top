@@ -10,6 +10,7 @@ import 'package:my5top/models/notification_rules.dart';
 import 'package:my5top/models/station.dart';
 import 'package:my5top/models/train_trip.dart';
 import 'package:my5top/providers/app_state.dart';
+import 'package:my5top/services/arrival_eta_engine.dart';
 import 'package:my5top/services/njt_api_service.dart';
 import 'package:my5top/theme/anime_theme.dart';
 import 'package:my5top/views/active_ride_screen.dart';
@@ -1107,5 +1108,364 @@ void main() {
       }
     });
   });
+
+  group('ArrivalEtaEngine 2-Part Final Arrival Precision Tests', () {
+    const double destLat = 40.5681; // Metropark
+    const double destLng = -74.3296;
+    const double metersPerDegLat = 111132.0;
+
+    test('Kinematic braking model outperforms naive distance/speed ETA', () {
+      // 70 mph (~31.29 m/s) at 1,240m out: naive d/v = 39.6s (20s too late!),
+      // whereas braking kinematics gives ~60s (triggers Approaching on time).
+      final kin60 = ArrivalEtaEngine.computeKinematicBrakingSeconds(
+        distanceMeters: 1240.0,
+        speedMps: 31.29,
+      );
+      expect(kin60, greaterThan(56.0));
+      expect(kin60, lessThan(63.0));
+
+      // Inside braking zone: 150m out at 20 m/s (~45 mph) -> ~10.5s
+      final kin10 = ArrivalEtaEngine.computeKinematicBrakingSeconds(
+        distanceMeters: 150.0,
+        speedMps: 20.0,
+      );
+      expect(kin10, greaterThan(8.5));
+      expect(kin10, lessThan(12.5));
+
+      expect(ArrivalEtaEngine.parseApiDelaySeconds('Delayed 7 min'), equals(420));
+      expect(ArrivalEtaEngine.parseApiDelaySeconds('4 min late'), equals(240));
+      expect(ArrivalEtaEngine.parseApiDelaySeconds('On Time'), equals(0));
+      expect(ArrivalEtaEngine.formatCountdown(58), equals('58s'));
+      expect(ArrivalEtaEngine.formatCountdown(125), equals('2m 05s'));
+      expect(ArrivalEtaEngine.formatCountdown(0), equals('Now'));
+    });
+
+    test(
+        'High-speed 67 mph 1Hz GPS approach fires Approaching (~1m) then Arriving (~10-19s) strictly BEFORE stop',
+        () {
+      final engine = ArrivalEtaEngine();
+      final startMs = DateTime.utc(2026, 11, 16, 22, 0, 0).millisecondsSinceEpoch;
+      engine.reset(
+        initialRouteDistanceMeters: 30000.0,
+        rideStartedEpochMs: startMs - 900000,
+      );
+
+      // Simulate train cruising at 30 m/s (67 mph) from 2,500m out, then braking at 0.72 m/s²
+      const double vCruise = 30.0;
+      const double decel = 0.72;
+      const double dBrake = (vCruise * vCruise) / (2.0 * decel); // 625m
+      double dist = 2500.0;
+      double speed = vCruise;
+      int tSec = 0;
+
+      bool hasFiredApproaching = false;
+      bool hasFiredArriving = false;
+      int? approachingTick;
+      int? arrivingTick;
+      int? platformMarkedTick;
+      int approachingCount = 0;
+      int arrivingCount = 0;
+
+      while (dist > 1.0 && tSec < 200) {
+        final nowMs = startMs + tSec * 1000;
+        final lat = destLat + (dist / metersPerDegLat);
+        engine.recordGpsFix(
+          GpsTelemetrySample(
+            latitude: lat,
+            longitude: destLng,
+            speedMps: speed,
+            accuracyMeters: 6.0,
+            timestampEpochMs: nowMs,
+          ),
+          destLat: destLat,
+          destLng: destLng,
+          stopsRemaining: 1,
+        );
+
+        final est = engine.evaluate(
+          nowEpochMs: nowMs,
+          scheduledArrivalEpochMs: startMs + 140 * 1000, // Slightly off schedule
+          stopsRemaining: 1,
+          apiStatus: 'On Time',
+          finalWakeUpAlarmEnabled: true,
+          hasFiredApproaching: hasFiredApproaching,
+          hasFiredArriving: hasFiredArriving,
+        );
+
+        if (est.shouldFireApproaching) {
+          hasFiredApproaching = true;
+          approachingTick = tSec;
+          approachingCount++;
+        }
+        if (est.shouldFireArriving) {
+          hasFiredArriving = true;
+          arrivingTick = tSec;
+          arrivingCount++;
+        }
+        if (est.shouldMarkPlatformArrived && platformMarkedTick == null) {
+          platformMarkedTick = tSec;
+          expect(dist, lessThanOrEqualTo(125.0));
+        }
+
+        // Advance physics by 1 second
+        if (dist > dBrake) {
+          dist -= vCruise;
+          speed = vCruise;
+        } else {
+          speed = (speed - decel).clamp(0.0, vCruise);
+          dist = (dist - (speed + 0.5 * decel)).clamp(0.0, 2500.0);
+          if (speed <= 0.1) break;
+        }
+        tSec++;
+      }
+
+      final totalStopSec = tSec;
+      expect(approachingCount, equals(1));
+      expect(arrivingCount, equals(1));
+      expect(approachingTick, isNotNull);
+      expect(arrivingTick, isNotNull);
+      expect(approachingTick!, lessThan(arrivingTick!));
+
+      final secsBeforeStopApproaching = totalStopSec - approachingTick!;
+      final secsBeforeStopArriving = totalStopSec - arrivingTick!;
+      expect(secsBeforeStopApproaching, inInclusiveRange(50, 72));
+      expect(secsBeforeStopArriving, inInclusiveRange(8, 22));
+      expect(platformMarkedTick, isNotNull);
+      expect(platformMarkedTick!, greaterThanOrEqualTo(arrivingTick!));
+    });
+
+    test(
+        'Low-speed 35 mph local approach still fires Approaching (~1m) and Arriving before stop',
+        () {
+      final engine = ArrivalEtaEngine();
+      final startMs = DateTime.utc(2026, 11, 16, 22, 0, 0).millisecondsSinceEpoch;
+      engine.reset(
+        initialRouteDistanceMeters: 15000.0,
+        rideStartedEpochMs: startMs - 600000,
+      );
+
+      const double vCruise = 15.6; // ~35 mph
+      const double decel = 0.72;
+      const double dBrake = (vCruise * vCruise) / (2.0 * decel); // ~169m
+      double dist = 1400.0;
+      double speed = vCruise;
+      int tSec = 0;
+
+      bool hasFiredApproaching = false;
+      bool hasFiredArriving = false;
+      int? approachingTick;
+      int? arrivingTick;
+
+      while (dist > 1.0 && tSec < 200) {
+        final nowMs = startMs + tSec * 1000;
+        engine.recordGpsFix(
+          GpsTelemetrySample(
+            latitude: destLat + (dist / metersPerDegLat),
+            longitude: destLng,
+            speedMps: speed,
+            accuracyMeters: 8.0,
+            timestampEpochMs: nowMs,
+          ),
+          destLat: destLat,
+          destLng: destLng,
+          stopsRemaining: 1,
+        );
+
+        final est = engine.evaluate(
+          nowEpochMs: nowMs,
+          scheduledArrivalEpochMs: startMs + 130 * 1000,
+          stopsRemaining: 1,
+          apiStatus: 'On Time',
+          finalWakeUpAlarmEnabled: true,
+          hasFiredApproaching: hasFiredApproaching,
+          hasFiredArriving: hasFiredArriving,
+        );
+
+        if (est.shouldFireApproaching) {
+          hasFiredApproaching = true;
+          approachingTick = tSec;
+        }
+        if (est.shouldFireArriving) {
+          hasFiredArriving = true;
+          arrivingTick = tSec;
+        }
+
+        if (dist > dBrake) {
+          dist -= vCruise;
+          speed = vCruise;
+        } else {
+          speed = (speed - decel).clamp(0.0, vCruise);
+          dist = (dist - (speed + 0.5 * decel)).clamp(0.0, 1400.0);
+          if (speed <= 0.1) break;
+        }
+        tSec++;
+      }
+
+      final totalStopSec = tSec;
+      expect(approachingTick, isNotNull);
+      expect(arrivingTick, isNotNull);
+      expect(totalStopSec - approachingTick!, inInclusiveRange(50, 72));
+      expect(totalStopSec - arrivingTick!, inInclusiveRange(8, 22));
+    });
+
+    test('Signal-hold detection suppresses false alerts while stopped 650m out',
+        () {
+      final engine = ArrivalEtaEngine();
+      final baseMs = DateTime.utc(2026, 11, 16, 22, 0, 0).millisecondsSinceEpoch;
+      engine.reset(
+        initialRouteDistanceMeters: 20000.0,
+        rideStartedEpochMs: baseMs - 600000,
+      );
+
+      final holdLat = destLat + (650.0 / metersPerDegLat);
+      for (int s = 0; s < 10; s++) {
+        engine.recordGpsFix(
+          GpsTelemetrySample(
+            latitude: holdLat,
+            longitude: destLng,
+            speedMps: 0.0,
+            accuracyMeters: 8.0,
+            timestampEpochMs: baseMs + s * 1000,
+          ),
+          destLat: destLat,
+          destLng: destLng,
+          stopsRemaining: 1,
+        );
+      }
+
+      final est = engine.evaluate(
+        nowEpochMs: baseMs + 10000,
+        scheduledArrivalEpochMs: baseMs + 15000, // Timetable thinks we're arriving!
+        stopsRemaining: 1,
+        apiStatus: 'On Time',
+        finalWakeUpAlarmEnabled: true,
+        hasFiredApproaching: false,
+        hasFiredArriving: false,
+      );
+
+      expect(est.isHoldingAtSignal, isTrue);
+      expect(est.shouldFireApproaching, isFalse);
+      expect(est.shouldFireArriving, isFalse);
+      expect(est.sourceLabel, contains('Holding'));
+    });
+
+    test(
+        'Hudson River Tunnel GPS-blackout uses Secaucus stop-pass delay calibration accurately',
+        () {
+      final engine = ArrivalEtaEngine();
+      final secaucusSchedMs =
+          DateTime.utc(2026, 11, 16, 13, 0, 0).millisecondsSinceEpoch;
+      final nyPennSchedMs =
+          secaucusSchedMs + 10 * 60 * 1000; // Scheduled 10m after Secaucus
+
+      engine.reset(
+        initialRouteDistanceMeters: 35000.0,
+        rideStartedEpochMs: secaucusSchedMs - 1800000,
+      );
+
+      // Train passes Secaucus exactly 3 minutes (180s) late, then loses GPS in tunnel
+      engine.recordStopPassed(
+        actualEpochMs: secaucusSchedMs + 180 * 1000,
+        scheduledStopEpochMs: secaucusSchedMs,
+      );
+      expect(engine.hasObservedStopAnchor, isTrue);
+      expect(engine.observedDelaySeconds, equals(180));
+
+      // Real expected NY Penn arrival is nyPennSchedMs + 180s.
+      // At nyPennSchedMs - 50s (still 230s away in reality!), must NOT fire prematurely:
+      final tooEarly = engine.evaluate(
+        nowEpochMs: nyPennSchedMs - 50 * 1000,
+        scheduledArrivalEpochMs: nyPennSchedMs,
+        stopsRemaining: 1,
+        apiStatus: 'On Time',
+        finalWakeUpAlarmEnabled: true,
+        hasFiredApproaching: false,
+        hasFiredArriving: false,
+      );
+      expect(tooEarly.shouldFireApproaching, isFalse);
+      expect(tooEarly.shouldFireArriving, isFalse);
+      expect(tooEarly.estimatedSeconds, closeTo(230.0, 2.0));
+      expect(tooEarly.sourceLabel, contains('Delay-Calibrated'));
+
+      // At 60s before calibrated real arrival: Part 1 Approaching fires!
+      final at60s = engine.evaluate(
+        nowEpochMs: nyPennSchedMs + 120 * 1000,
+        scheduledArrivalEpochMs: nyPennSchedMs,
+        stopsRemaining: 1,
+        apiStatus: 'On Time',
+        finalWakeUpAlarmEnabled: true,
+        hasFiredApproaching: false,
+        hasFiredArriving: false,
+      );
+      expect(at60s.shouldFireApproaching, isTrue);
+      expect(at60s.shouldFireArriving, isFalse);
+
+      // At 10s before calibrated real arrival: Part 2 Arriving fires!
+      final at10s = engine.evaluate(
+        nowEpochMs: nyPennSchedMs + 170 * 1000,
+        scheduledArrivalEpochMs: nyPennSchedMs,
+        stopsRemaining: 1,
+        apiStatus: 'On Time',
+        finalWakeUpAlarmEnabled: true,
+        hasFiredApproaching: true,
+        hasFiredArriving: false,
+      );
+      expect(at10s.shouldFireApproaching, isFalse);
+      expect(at10s.shouldFireArriving, isTrue);
+    });
+
+    test(
+        'Physical lower-bound sanity check prevents false triggers when GPS proves train is still 3km away',
+        () {
+      final engine = ArrivalEtaEngine();
+      final baseMs = DateTime.utc(2026, 11, 16, 22, 0, 0).millisecondsSinceEpoch;
+      engine.reset(
+        initialRouteDistanceMeters: 30000.0,
+        rideStartedEpochMs: baseMs - 1200000,
+      );
+
+      // Train is moving at 25 m/s ~3,000m from destination (~135s away physically),
+      // even though static schedule claims arrival is in 20s!
+      engine.recordGpsFix(
+        GpsTelemetrySample(
+          latitude: destLat + (3025.0 / metersPerDegLat),
+          longitude: destLng,
+          speedMps: 25.0,
+          accuracyMeters: 6.0,
+          timestampEpochMs: baseMs,
+        ),
+        destLat: destLat,
+        destLng: destLng,
+        stopsRemaining: 1,
+      );
+      engine.recordGpsFix(
+        GpsTelemetrySample(
+          latitude: destLat + (3000.0 / metersPerDegLat),
+          longitude: destLng,
+          speedMps: 25.0,
+          accuracyMeters: 6.0,
+          timestampEpochMs: baseMs + 1000,
+        ),
+        destLat: destLat,
+        destLng: destLng,
+        stopsRemaining: 1,
+      );
+
+      final est = engine.evaluate(
+        nowEpochMs: baseMs + 1000,
+        scheduledArrivalEpochMs: baseMs + 21000, // Stale timetable says 20s left
+        stopsRemaining: 1,
+        apiStatus: 'On Time',
+        finalWakeUpAlarmEnabled: true,
+        hasFiredApproaching: false,
+        hasFiredArriving: false,
+      );
+
+      expect(est.estimatedSeconds, greaterThan(100.0));
+      expect(est.shouldFireApproaching, isFalse);
+      expect(est.shouldFireArriving, isFalse);
+    });
+  });
 }
+
 

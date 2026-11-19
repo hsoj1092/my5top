@@ -31,6 +31,9 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -52,7 +55,10 @@ class CommuteForegroundService : Service() {
         private const val KEY_BG_TRAIN_ID = "bg_train_id"
         private const val KEY_BG_STOP_INDEX = "bg_current_stop_index"
         private const val KEY_BG_NOTIFIED_INDICES = "bg_notified_stop_indices"
+        private const val KEY_BG_FIRED_APPROACHING = "bg_has_fired_approaching"
         private const val KEY_BG_FIRED_WAKEUP = "bg_has_fired_wakeup"
+        private const val KEY_BG_OBSERVED_DELAY_SEC = "bg_observed_delay_sec"
+        private const val KEY_BG_HAS_DELAY_ANCHOR = "bg_has_delay_anchor"
         private const val KEY_BG_SIGNAL_SOURCE = "bg_last_signal_source"
         private const val KEY_BG_DETECTED_TRACK = "bg_detected_track"
         private const val KEY_BG_DETECTED_STATUS = "bg_detected_status"
@@ -61,6 +67,17 @@ class CommuteForegroundService : Service() {
         private const val KEY_BG_STOP_REASON = "bg_stop_reason"
 
         private const val NJT_GRAPHQL_URL = "https://www.njtransit.com/api/graphql/graphql"
+
+        // Precision 2-part final arrival kinematics constants (synced with Dart ArrivalEtaEngine)
+        private const val SERVICE_BRAKING_DECEL_MPS2 = 0.72
+        private const val MAX_NEC_SPEED_MPS = 38.0
+        private const val PLATFORM_LEAD_METERS = 45.0
+        private const val APPROACHING_THRESHOLD_SEC = 62.0
+        private const val ARRIVING_THRESHOLD_SEC = 12.0
+        private const val GPS_FRESH_MAX_AGE_SEC = 14.0
+        private const val GPS_DEAD_RECKONING_MAX_AGE_SEC = 45.0
+        private const val PLATFORM_ARRIVAL_RADIUS_METERS = 135.0
+        private const val PLATFORM_ARRIVED_MARK_RADIUS_METERS = 115.0
 
         // Battery-safe hard cutoffs
         private const val MAX_RIDE_DURATION_MS = 3L * 60L * 60L * 1000L // 3 hours max
@@ -76,6 +93,9 @@ class CommuteForegroundService : Service() {
 
         @Volatile
         var isRunning: Boolean = false
+
+        @Volatile
+        private var activeInstance: CommuteForegroundService? = null
 
         fun startOrUpdate(context: Context, payloadJson: String) {
             try {
@@ -113,6 +133,11 @@ class CommuteForegroundService : Service() {
 
         fun onUiAttached(context: Context) {
             isUiAttached = true
+            val instance = activeInstance
+            if (instance != null) {
+                instance.handleUiAttachedDirectly()
+                return
+            }
             if (!isRunning) return
             try {
                 val appCtx = context.applicationContext
@@ -125,6 +150,11 @@ class CommuteForegroundService : Service() {
 
         fun onUiDetached(context: Context) {
             isUiAttached = false
+            val instance = activeInstance
+            if (instance != null) {
+                instance.handleUiDetachedDirectly()
+                return
+            }
             if (!isRunning) return
             try {
                 val appCtx = context.applicationContext
@@ -159,7 +189,10 @@ class CommuteForegroundService : Service() {
                     "trainId" to (prefs.getString(KEY_BG_TRAIN_ID, "") ?: ""),
                     "currentStopIndex" to prefs.getInt(KEY_BG_STOP_INDEX, -1),
                     "notifiedStopIndices" to notifiedList,
+                    "hasFiredApproachingAlert" to prefs.getBoolean(KEY_BG_FIRED_APPROACHING, false),
                     "hasFiredWakeUpAlarm" to prefs.getBoolean(KEY_BG_FIRED_WAKEUP, false),
+                    "observedDelaySeconds" to prefs.getInt(KEY_BG_OBSERVED_DELAY_SEC, 0),
+                    "hasObservedStopAnchor" to prefs.getBoolean(KEY_BG_HAS_DELAY_ANCHOR, false),
                     "lastTrackingSignalSource" to (prefs.getString(KEY_BG_SIGNAL_SOURCE, "") ?: ""),
                     "detectedTrack" to (prefs.getString(KEY_BG_DETECTED_TRACK, "") ?: ""),
                     "detectedStatus" to (prefs.getString(KEY_BG_DETECTED_STATUS, "") ?: ""),
@@ -187,7 +220,8 @@ class CommuteForegroundService : Service() {
         val name: String,
         val latitude: Double,
         val longitude: Double,
-        val estimatedTime: String
+        val estimatedTime: String,
+        val scheduledEpochMs: Long = 0L
     )
 
     private var executor: ScheduledExecutorService? = null
@@ -196,6 +230,7 @@ class CommuteForegroundService : Service() {
 
     private var locationManager: LocationManager? = null
     private var gpsListenerRegistered = false
+    private var gpsInPrecisionMode = false
 
     // Active parsed state
     @Volatile
@@ -215,8 +250,21 @@ class CommuteForegroundService : Service() {
     private var currentStatus: String = "On Time"
     private var currentStopIndex: Int = 0
     private val notifiedStopIndices = mutableSetOf<Int>()
+    private var hasFiredApproachingAlert: Boolean = false
     private var hasFiredWakeUpAlarm: Boolean = false
+    private var observedDelaySeconds: Int = 0
+    private var hasObservedStopAnchor: Boolean = false
+    private var initialRouteDistanceMeters: Double = 0.0
     private var stops: List<BgStop> = emptyList()
+
+    // Live GPS kinematics & headless ETA state
+    private var lastGpsDistMeters: Double? = null
+    private var lastGpsTimestampMs: Long = 0L
+    private var lastGpsSpeedMps: Double = 0.0
+    private var smoothedClosingSpeedMps: Double? = null
+    private var lastRideApiPollMs: Long = 0L
+    private var lastLiveEtaSeconds: Double? = null
+    private var lastLiveNotifUpdateMs: Long = 0L
 
     // Notification rules
     private var notifyEveryStop: Boolean = false
@@ -253,7 +301,44 @@ class CommuteForegroundService : Service() {
         super.onCreate()
         CommuteAlertHelper.ensureNotificationChannels(this)
         executor = Executors.newSingleThreadScheduledExecutor()
+        activeInstance = this
         isRunning = true
+    }
+
+    private fun isRideInPrecisionApproach(nowMs: Long): Boolean {
+        if (mode != "ride" || stopsRemaining() == 0) return false
+        if (stopsRemaining() <= 1) return true
+        val dist = lastGpsDistMeters
+        if (dist != null && dist <= 5000.0) return true
+        val eta = lastLiveEtaSeconds
+        if (eta != null && eta <= 360.0) return true
+        if (arrivalEpochMs > 0L) {
+            val delaySec = if (hasObservedStopAnchor) observedDelaySeconds else parseApiDelaySeconds(currentStatus)
+            val schedEta = ((arrivalEpochMs + delaySec * 1000L) - nowMs) / 1000.0
+            if (schedEta <= 360.0) return true
+        }
+        return false
+    }
+
+    private fun handleUiAttachedDirectly() {
+        isUiAttached = true
+        stopNativeGpsUpdates()
+        scheduleNextTick(15_000L)
+    }
+
+    private fun handleUiDetachedDirectly() {
+        isUiAttached = false
+        if (mode.isEmpty()) {
+            loadPersistedPayloadIfAvailable()
+        }
+        if (mode.isEmpty()) {
+            shutdownService(clearPayload = true)
+            return
+        }
+        if (mode == "ride") {
+            startNativeGpsUpdatesIfPermitted(precision = isRideInPrecisionApproach(System.currentTimeMillis()))
+        }
+        scheduleNextTick(1_000L)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -273,25 +358,12 @@ class CommuteForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_UI_ATTACHED -> {
-                isUiAttached = true
-                stopNativeGpsUpdates()
-                scheduleNextTick(15_000L)
+                handleUiAttachedDirectly()
                 return START_STICKY
             }
             ACTION_UI_DETACHED -> {
-                isUiAttached = false
-                if (mode.isEmpty()) {
-                    loadPersistedPayloadIfAvailable()
-                }
-                if (mode.isEmpty()) {
-                    shutdownService(clearPayload = true)
-                    return START_NOT_STICKY
-                }
-                if (mode == "ride") {
-                    startNativeGpsUpdatesIfPermitted()
-                }
-                scheduleNextTick(1_000L)
-                return START_STICKY
+                handleUiDetachedDirectly()
+                return if (mode.isEmpty()) START_NOT_STICKY else START_STICKY
             }
         }
 
@@ -317,7 +389,7 @@ class CommuteForegroundService : Service() {
         )
 
         if (!isUiAttached && mode == "ride") {
-            startNativeGpsUpdatesIfPermitted()
+            startNativeGpsUpdatesIfPermitted(precision = isRideInPrecisionApproach(System.currentTimeMillis()))
         } else {
             stopNativeGpsUpdates()
         }
@@ -337,14 +409,14 @@ class CommuteForegroundService : Service() {
         }
         if (mode.isNotEmpty()) {
             if (mode == "ride") {
-                startNativeGpsUpdatesIfPermitted()
+                startNativeGpsUpdatesIfPermitted(precision = isRideInPrecisionApproach(System.currentTimeMillis()))
             }
             updateForegroundNotification(
                 title = defaultNotificationTitle(),
                 body = "${defaultNotificationBody()} • Silent Guard active",
                 subText = defaultNotificationSubText()
             )
-            scheduleNextTick(1_500L)
+            scheduleNextTick(1_000L)
         }
     }
 
@@ -355,6 +427,9 @@ class CommuteForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         isRunning = false
         stopNativeGpsUpdates()
         scheduledTick?.cancel(true)
@@ -385,8 +460,15 @@ class CommuteForegroundService : Service() {
             if (savedIdx > currentStopIndex && savedIdx < stops.size) {
                 currentStopIndex = savedIdx
             }
+            if (prefs.getBoolean(KEY_BG_FIRED_APPROACHING, false)) {
+                hasFiredApproachingAlert = true
+            }
             if (prefs.getBoolean(KEY_BG_FIRED_WAKEUP, false)) {
                 hasFiredWakeUpAlarm = true
+            }
+            if (prefs.getBoolean(KEY_BG_HAS_DELAY_ANCHOR, false)) {
+                observedDelaySeconds = prefs.getInt(KEY_BG_OBSERVED_DELAY_SEC, observedDelaySeconds)
+                hasObservedStopAnchor = true
             }
             try {
                 val rawNotified = prefs.getString(KEY_BG_NOTIFIED_INDICES, null)
@@ -438,6 +520,17 @@ class CommuteForegroundService : Service() {
                 fastBurstStartedAtMs = 0L
                 rateLimitBackoffUntilMs = 0L
                 consecutiveFailures = 0
+                hasFiredApproachingAlert = false
+                hasFiredWakeUpAlarm = false
+                observedDelaySeconds = 0
+                hasObservedStopAnchor = false
+                lastGpsDistMeters = null
+                lastGpsTimestampMs = 0L
+                lastGpsSpeedMps = 0.0
+                smoothedClosingSpeedMps = null
+                lastRideApiPollMs = 0L
+                lastLiveEtaSeconds = null
+                lastLiveNotifUpdateMs = 0L
             }
             val rawNotified = obj.optJSONArray("notifiedStopIndices")
             if (rawNotified != null) {
@@ -445,10 +538,19 @@ class CommuteForegroundService : Service() {
                     notifiedStopIndices.add(rawNotified.optInt(i))
                 }
             }
+            hasFiredApproachingAlert = if (trainChanged) {
+                obj.optBoolean("hasFiredApproachingAlert", false)
+            } else {
+                hasFiredApproachingAlert || obj.optBoolean("hasFiredApproachingAlert", false)
+            }
             hasFiredWakeUpAlarm = if (trainChanged) {
                 obj.optBoolean("hasFiredWakeUpAlarm", false)
             } else {
                 hasFiredWakeUpAlarm || obj.optBoolean("hasFiredWakeUpAlarm", false)
+            }
+            if (obj.optBoolean("hasObservedStopAnchor", false)) {
+                observedDelaySeconds = obj.optInt("observedDelaySeconds", observedDelaySeconds)
+                hasObservedStopAnchor = true
             }
 
             val parsedStops = mutableListOf<BgStop>()
@@ -462,12 +564,25 @@ class CommuteForegroundService : Service() {
                             name = s.optString("stationName", ""),
                             latitude = s.optDouble("latitude", 0.0),
                             longitude = s.optDouble("longitude", 0.0),
-                            estimatedTime = s.optString("estimatedTime", "")
+                            estimatedTime = s.optString("estimatedTime", ""),
+                            scheduledEpochMs = s.optLong("scheduledEpochMs", 0L)
                         )
                     )
                 }
             }
             stops = parsedStops
+
+            val incomingRouteDist = obj.optDouble("initialRouteDistanceMeters", 0.0)
+            initialRouteDistanceMeters = when {
+                incomingRouteDist > 0.0 -> incomingRouteDist
+                parsedStops.size >= 2 -> haversineMeters(
+                    parsedStops.first().latitude,
+                    parsedStops.first().longitude,
+                    parsedStops.last().latitude,
+                    parsedStops.last().longitude
+                )
+                else -> 0.0
+            }
 
             val rules = obj.optJSONObject("rules")
             if (rules != null) {
@@ -600,9 +715,19 @@ class CommuteForegroundService : Service() {
         if (rem == 0) {
             return "Commute complete! Auto-stopping soon to save battery."
         }
+        if (hasFiredWakeUpAlarm) {
+            return "🚨 ARRIVING NOW at $destShortName! Stand up & head to the doors"
+        }
+        val etaSec = lastLiveEtaSeconds?.roundToInt()?.coerceAtLeast(0)
         val currName = stops.getOrNull(currentStopIndex)?.name ?: originShortName
         val nextName = stops.getOrNull((currentStopIndex + 1).coerceAtMost(stops.lastIndex.coerceAtLeast(0)))?.name
             ?: destShortName
+        if (hasFiredApproachingAlert && etaSec != null) {
+            return "⏳ Approaching $destShortName (~${formatCountdownLabel(etaSec)}) • Final alert at ~10s"
+        }
+        if (etaSec != null) {
+            return "Next: $nextName • ETA ~${formatCountdownLabel(etaSec)} • Passed: $currName"
+        }
         return "Passed: $currName • Next: $nextName • ETA $arrivalTime"
     }
 
@@ -610,7 +735,8 @@ class CommuteForegroundService : Service() {
         if (mode == "watch") {
             return if (isInFastTrackBurstWindow(System.currentTimeMillis())) "⚡ 1s Watch" else "Track Watch"
         }
-        return if (currentTrack.isNotBlank()) "Track $currentTrack • Guard ON" else "my5top Guard"
+        val trackPrefix = if (currentTrack.isNotBlank()) "Track $currentTrack • " else ""
+        return if (gpsInPrecisionMode) "${trackPrefix}⚡ 1Hz Precision" else "${trackPrefix}Guard ON"
     }
 
     private fun scheduleNextTick(delayMs: Long) {
@@ -635,9 +761,16 @@ class CommuteForegroundService : Service() {
                 return
             }
 
-            // Headless mode (UI closed / swiped away): poll NJT API natively!
+            // Headless mode (screen off / app backgrounded / swiped away)
             if (mode == "ride") {
-                pollHeadlessRideStops()
+                val apiIntervalMs = if (consecutiveFailures >= 8) 60_000L else 15_000L
+                if (lastRideApiPollMs == 0L || (nowMs - lastRideApiPollMs) >= apiIntervalMs) {
+                    lastRideApiPollMs = nowMs
+                    pollHeadlessRideStops()
+                }
+                if (isRunning && mode == "ride") {
+                    evaluateHeadlessArrivalEta(System.currentTimeMillis())
+                }
             } else if (mode == "watch") {
                 pollHeadlessWatchTrack(nowMs)
             }
@@ -672,8 +805,10 @@ class CommuteForegroundService : Service() {
                 shutdownService(clearPayload = true)
                 return true
             }
-            // Cutoff 2: Scheduled arrival overrun cutoff (20 min past ETA)
-            if (arrivalEpochMs > 0L && (nowMs - arrivalEpochMs) >= ARRIVAL_STALE_BUFFER_MS) {
+            // Cutoff 2: Live/scheduled arrival overrun cutoff (20 min past delay-adjusted ETA)
+            val delayBufferMs = max(0, if (hasObservedStopAnchor) observedDelaySeconds else parseApiDelaySeconds(currentStatus)) * 1000L
+            val effectiveArrivalEpochMs = if (arrivalEpochMs > 0L) arrivalEpochMs + delayBufferMs else 0L
+            if (effectiveArrivalEpochMs > 0L && (nowMs - effectiveArrivalEpochMs) >= ARRIVAL_STALE_BUFFER_MS) {
                 recordBackgroundDelta(
                     arrived = true,
                     stopReason = "Auto-stopped 20m past ETA to save battery"
@@ -750,8 +885,12 @@ class CommuteForegroundService : Service() {
             val secsUntilDep = if (departureEpochMs > 0L) (departureEpochMs - nowMs) / 1000L else 0L
             return if (secsUntilDep > 1200L) 15_000L else 5_000L
         }
-        // Ride mode: battery-friendly 15s API polling (backs off to 60s if network offline)
-        return if (consecutiveFailures >= 8) 60_000L else 15_000L
+        // Ride mode: 1Hz precision ETA evaluation during Final Approach (API still throttled to 15s),
+        // or 5s cruising check when further away.
+        if (isRideInPrecisionApproach(nowMs)) {
+            return 1_000L
+        }
+        return 5_000L
     }
 
     private fun pollHeadlessWatchTrack(nowMs: Long) {
@@ -923,8 +1062,8 @@ class CommuteForegroundService : Service() {
         }
     }
 
-    private fun startNativeGpsUpdatesIfPermitted() {
-        if (gpsListenerRegistered) return
+    private fun startNativeGpsUpdatesIfPermitted(precision: Boolean = false) {
+        if (gpsListenerRegistered && gpsInPrecisionMode == precision) return
         val hasFine = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.ACCESS_FINE_LOCATION
@@ -936,30 +1075,57 @@ class CommuteForegroundService : Service() {
         if (!hasFine && !hasCoarse) return
 
         mainHandler.post {
-            if (gpsListenerRegistered || isUiAttached || mode != "ride") return@post
+            if (isUiAttached || mode != "ride") return@post
+            if (gpsListenerRegistered && gpsInPrecisionMode == precision) return@post
             try {
                 val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return@post
                 locationManager = lm
+                if (gpsListenerRegistered) {
+                    try {
+                        lm.removeUpdates(locationListener)
+                    } catch (_: Throwable) {}
+                    gpsListenerRegistered = false
+                }
+                val gpsIntervalMs = if (precision) 1_000L else 10_000L
+                val gpsMinDistM = if (precision) 0f else 50f
+                val netIntervalMs = if (precision) 2_000L else 15_000L
+                val netMinDistM = if (precision) 0f else 80f
+
                 if (hasFine && lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     lm.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
-                        20_000L,
-                        100f,
+                        gpsIntervalMs,
+                        gpsMinDistM,
                         locationListener,
                         Looper.getMainLooper()
                     )
                     gpsListenerRegistered = true
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    try {
+                        if (lm.isProviderEnabled(LocationManager.FUSED_PROVIDER)) {
+                            lm.requestLocationUpdates(
+                                LocationManager.FUSED_PROVIDER,
+                                gpsIntervalMs,
+                                gpsMinDistM,
+                                locationListener,
+                                Looper.getMainLooper()
+                            )
+                            gpsListenerRegistered = true
+                        }
+                    } catch (_: Throwable) {}
                 }
                 if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                     lm.requestLocationUpdates(
                         LocationManager.NETWORK_PROVIDER,
-                        25_000L,
-                        150f,
+                        netIntervalMs,
+                        netMinDistM,
                         locationListener,
                         Looper.getMainLooper()
                     )
                     gpsListenerRegistered = true
                 }
+                gpsInPrecisionMode = precision
             } catch (_: Throwable) {}
         }
     }
@@ -971,30 +1137,318 @@ class CommuteForegroundService : Service() {
                 locationManager?.removeUpdates(locationListener)
             } catch (_: Throwable) {}
             gpsListenerRegistered = false
+            gpsInPrecisionMode = false
         }
+    }
+
+    private fun computeKinematicBrakingSeconds(
+        distanceMeters: Double,
+        speedMps: Double
+    ): Double {
+        val dEff = max(0.0, distanceMeters - PLATFORM_LEAD_METERS)
+        if (dEff <= 0.0) return 0.0
+        val v = speedMps.coerceIn(0.5, MAX_NEC_SPEED_MPS)
+        val dBrake = (v * v) / (2.0 * SERVICE_BRAKING_DECEL_MPS2)
+        if (dEff <= dBrake) {
+            return (2.0 * dEff) / v
+        }
+        val cruiseDist = dEff - dBrake
+        return (cruiseDist / v) + (v / SERVICE_BRAKING_DECEL_MPS2)
+    }
+
+    private fun parseApiDelaySeconds(status: String): Int {
+        val s = status.trim().lowercase()
+        if (s.isEmpty() || s == "on time" || s == "ontime") return 0
+        val m1 = Regex("(?:delayed?|late)\\s*(?:by\\s*)?(\\d+)\\s*(?:min|m\\b)").find(s)
+        if (m1 != null) {
+            val mins = m1.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+            return (mins * 60).coerceIn(0, 3600)
+        }
+        val m2 = Regex("(\\d+)\\s*(?:min|m)\\s*(?:late|delay)").find(s)
+        if (m2 != null) {
+            val mins = m2.groupValues.getOrNull(1)?.toIntOrNull() ?: 0
+            return (mins * 60).coerceIn(0, 3600)
+        }
+        return 0
+    }
+
+    private fun recordHeadlessStopPassed(stopIdx: Int, actualEpochMs: Long) {
+        val stop = stops.getOrNull(stopIdx) ?: return
+        if (stop.scheduledEpochMs <= 0L) return
+        val rawDelay = ((actualEpochMs - stop.scheduledEpochMs) / 1000.0)
+            .roundToInt()
+            .coerceIn(-600, 3600)
+        if (!hasObservedStopAnchor) {
+            observedDelaySeconds = rawDelay
+            hasObservedStopAnchor = true
+        } else {
+            observedDelaySeconds = (0.75 * rawDelay + 0.25 * observedDelaySeconds).roundToInt()
+        }
+    }
+
+    private fun formatCountdownLabel(seconds: Int): String {
+        if (seconds <= 0) return "Now"
+        if (seconds < 60) return "${seconds}s"
+        val mins = seconds / 60
+        val rem = seconds % 60
+        if (mins >= 10) return "${((seconds + 59) / 60)}m"
+        return "${mins}m ${rem.toString().padStart(2, '0')}s"
     }
 
     private fun handleHeadlessGpsFix(loc: Location) {
         if (stops.isEmpty()) return
-        for (i in (currentStopIndex + 1) until stops.size) {
-            val st = stops[i]
-            val dist = haversineMeters(loc.latitude, loc.longitude, st.latitude, st.longitude)
-            if (dist <= gpsStationRadiusMeters) {
-                advanceHeadlessStop(i, "Silent GPS Geofence (${dist.toInt()}m)")
-                break
+        val nowMs = System.currentTimeMillis()
+        val acc = if (loc.hasAccuracy()) loc.accuracy.toDouble() else 50.0
+
+        // Reject wildly coarse fixes when we already have a fresh accurate fix
+        if (acc > 200.0 && lastGpsTimestampMs > 0L && (nowMs - lastGpsTimestampMs) < 25_000L) {
+            return
+        }
+
+        // Advance INTERMEDIATE stops only at gpsStationRadiusMeters;
+        // the final destination stop is handled by the precision 2-stage arrival engine!
+        val lastIntermediateIdx = stops.lastIndex - 1
+        if (lastIntermediateIdx >= currentStopIndex + 1) {
+            for (i in (currentStopIndex + 1)..lastIntermediateIdx) {
+                val st = stops[i]
+                val dist = haversineMeters(loc.latitude, loc.longitude, st.latitude, st.longitude)
+                if (dist <= gpsStationRadiusMeters) {
+                    advanceHeadlessStop(i, "Silent GPS Geofence (${dist.toInt()}m)")
+                    break
+                }
             }
         }
 
         val destStop = stops.last()
-        val distToDest = haversineMeters(loc.latitude, loc.longitude, destStop.latitude, destStop.longitude)
+        val distNow = haversineMeters(loc.latitude, loc.longitude, destStop.latitude, destStop.longitude)
+        val dopplerSpeed = if (loc.hasSpeed()) loc.speed.toDouble() else -1.0
+        val validDoppler = dopplerSpeed.isFinite() && dopplerSpeed in 0.0..MAX_NEC_SPEED_MPS
+
+        val prevDist = lastGpsDistMeters
+        if (prevDist != null && lastGpsTimestampMs > 0L) {
+            val dtSec = (nowMs - lastGpsTimestampMs) / 1000.0
+            if (dtSec in 0.4..35.0) {
+                val rawClosing = (prevDist - distNow) / dtSec
+                if (rawClosing > 0.5) {
+                    val clampedClosing = rawClosing.coerceIn(0.0, MAX_NEC_SPEED_MPS)
+                    val measured = if (validDoppler && dopplerSpeed >= 1.5) {
+                        0.65 * clampedClosing + 0.35 * min(dopplerSpeed, clampedClosing * 1.25)
+                    } else {
+                        clampedClosing
+                    }
+                    val alpha = if (distNow <= 3500.0) 0.48 else 0.32
+                    smoothedClosingSpeedMps = smoothedClosingSpeedMps?.let {
+                        alpha * measured + (1.0 - alpha) * it
+                    } ?: measured
+                } else if (rawClosing <= 0.5 && (!validDoppler || dopplerSpeed < 1.5)) {
+                    val decayed = (0.35 * (smoothedClosingSpeedMps ?: 0.0)).coerceIn(0.0, MAX_NEC_SPEED_MPS)
+                    smoothedClosingSpeedMps = if (decayed < 0.4) 0.0 else decayed
+                }
+            }
+        } else if (validDoppler && dopplerSpeed >= 2.0) {
+            if (stopsRemaining() <= 1 || (initialRouteDistanceMeters > 0.0 && distNow < initialRouteDistanceMeters * 0.9)) {
+                smoothedClosingSpeedMps = dopplerSpeed * 0.88
+            }
+        }
+
+        lastGpsDistMeters = distNow
+        lastGpsTimestampMs = nowMs
+        lastGpsSpeedMps = if (validDoppler) dopplerSpeed else (smoothedClosingSpeedMps ?: 0.0)
+
+        evaluateHeadlessArrivalEta(nowMs)
+    }
+
+    private fun evaluateHeadlessArrivalEta(nowMs: Long) {
+        if (mode != "ride" || stops.isEmpty()) return
+        val rem = stopsRemaining()
+        val apiDelaySec = parseApiDelaySeconds(currentStatus)
+        val delaySec = if (hasObservedStopAnchor) observedDelaySeconds else apiDelaySec
+
+        var schedEtaSec: Double? = if (arrivalEpochMs > 0L) {
+            ((arrivalEpochMs + delaySec * 1000L) - nowMs) / 1000.0
+        } else {
+            null
+        }
+
+        val gpsAgeSec = if (lastGpsTimestampMs > 0L) (nowMs - lastGpsTimestampMs) / 1000.0 else null
+        val gpsFresh = gpsAgeSec != null && gpsAgeSec in -2.0..GPS_FRESH_MAX_AGE_SEC && lastGpsDistMeters != null
+        val clampedAge = if (gpsAgeSec != null) max(0.0, gpsAgeSec) else 0.0
+        val closingV = smoothedClosingSpeedMps ?: 0.0
+        val gpsDeadReckoning = !gpsFresh &&
+            gpsAgeSec != null &&
+            gpsAgeSec > GPS_FRESH_MAX_AGE_SEC &&
+            gpsAgeSec <= GPS_DEAD_RECKONING_MAX_AGE_SEC &&
+            lastGpsDistMeters != null &&
+            lastGpsDistMeters!! <= 3500.0 &&
+            closingV >= 4.0
+
+        val extrapDist: Double? = when {
+            gpsFresh -> max(0.0, lastGpsDistMeters!! - closingV * clampedAge)
+            gpsDeadReckoning -> max(0.0, lastGpsDistMeters!! - closingV * clampedAge * 0.85)
+            else -> null
+        }
+
+        if (gpsFresh && extrapDist != null && extrapDist > 1800.0 && schedEtaSec != null) {
+            val minPhysical = computeKinematicBrakingSeconds(
+                extrapDist,
+                max(closingV, 28.0).coerceIn(15.0, MAX_NEC_SPEED_MPS)
+            )
+            if (schedEtaSec < minPhysical) {
+                schedEtaSec = minPhysical
+            }
+        }
+
+        val isHolding = gpsFresh &&
+            extrapDist != null &&
+            extrapDist > PLATFORM_ARRIVAL_RADIUS_METERS &&
+            closingV < 1.5 &&
+            lastGpsSpeedMps < 1.5
+
+        val fusedEtaSec: Double? = when {
+            rem == 0 -> 0.0
+            gpsFresh && extrapDist != null -> {
+                when {
+                    extrapDist <= PLATFORM_ARRIVAL_RADIUS_METERS -> {
+                        if (closingV >= 1.8) {
+                            computeKinematicBrakingSeconds(extrapDist, closingV).coerceIn(0.0, 10.0)
+                        } else {
+                            0.0
+                        }
+                    }
+                    isHolding -> {
+                        val floor = extrapDist / 14.0
+                        if (schedEtaSec != null) max(schedEtaSec, floor) else floor
+                    }
+                    closingV >= 1.8 -> {
+                        val dwell = if (rem > 1 && extrapDist > 2200.0) (rem - 1) * 55.0 else 0.0
+                        val kin = computeKinematicBrakingSeconds(extrapDist, closingV) + dwell
+                        when {
+                            extrapDist <= 3800.0 || rem <= 1 -> kin
+                            extrapDist <= 7500.0 && schedEtaSec != null && schedEtaSec > 0.0 ->
+                                0.65 * kin + 0.35 * schedEtaSec
+                            schedEtaSec != null && schedEtaSec > 0.0 ->
+                                0.35 * kin + 0.65 * schedEtaSec
+                            else -> kin
+                        }
+                    }
+                    else -> schedEtaSec ?: (extrapDist / 18.0)
+                }
+            }
+            gpsDeadReckoning && extrapDist != null -> {
+                val dr = computeKinematicBrakingSeconds(extrapDist, closingV)
+                if (schedEtaSec != null && schedEtaSec > 0.0) 0.55 * dr + 0.45 * schedEtaSec else dr
+            }
+            else -> schedEtaSec
+        }
+
+        lastLiveEtaSeconds = fusedEtaSec
+
+        // Upgrade native GPS to 1Hz precision mode automatically during final approach!
+        val needPrecision = rem <= 1 ||
+            (extrapDist != null && extrapDist <= 5000.0) ||
+            (fusedEtaSec != null && fusedEtaSec <= 360.0)
+        if (!isUiAttached && rem > 0 && needPrecision != gpsInPrecisionMode) {
+            startNativeGpsUpdatesIfPermitted(precision = needPrecision)
+        }
+
+        val movedFromOrigin = initialRouteDistanceMeters <= 0.0 ||
+            extrapDist == null ||
+            extrapDist < initialRouteDistanceMeters * 0.80
+        val pastOriginGuard = rem <= 1 || movedFromOrigin || (nowMs - startedAtEpochMs >= 45_000L)
+
+        var stateChanged = false
+
+        // Stage 2: "Arriving" (~10s before platform stop — GET UP NOW!)
+        var shouldFireArriving = false
+        if (finalWakeUpAlarm && !hasFiredWakeUpAlarm && pastOriginGuard) {
+            if (rem == 0) {
+                shouldFireArriving = true
+            } else if (gpsFresh && extrapDist != null) {
+                val within10s = !isHolding &&
+                    fusedEtaSec != null &&
+                    fusedEtaSec <= ARRIVING_THRESHOLD_SEC &&
+                    extrapDist <= 520.0
+                val atPlatform = extrapDist <= PLATFORM_ARRIVAL_RADIUS_METERS
+                if (within10s || atPlatform) {
+                    shouldFireArriving = true
+                }
+            } else if (rem <= 1 &&
+                fusedEtaSec != null &&
+                fusedEtaSec <= ARRIVING_THRESHOLD_SEC &&
+                fusedEtaSec >= -25.0
+            ) {
+                shouldFireArriving = true
+            }
+        }
+
+        // Stage 1: "Approaching" (~1 min before platform stop — Pack up & get ready!)
+        var shouldFireApproaching = false
         if (finalWakeUpAlarm &&
+            !hasFiredApproachingAlert &&
             !hasFiredWakeUpAlarm &&
-            distToDest <= 950.0 &&
-            stopsRemaining() <= 1
+            !shouldFireArriving &&
+            pastOriginGuard &&
+            rem > 0 &&
+            !isHolding &&
+            fusedEtaSec != null &&
+            fusedEtaSec <= APPROACHING_THRESHOLD_SEC &&
+            fusedEtaSec > ARRIVING_THRESHOLD_SEC
         ) {
+            if (gpsFresh && extrapDist != null) {
+                if (extrapDist <= 3400.0) {
+                    shouldFireApproaching = true
+                }
+            } else if (rem <= 1) {
+                shouldFireApproaching = true
+            }
+        }
+
+        if (shouldFireApproaching) {
+            hasFiredApproachingAlert = true
+            stateChanged = true
+            val secs = fusedEtaSec!!.roundToInt().coerceAtLeast(15)
+            val distDesc = extrapDist?.let {
+                if (it >= 1000.0) "${String.format("%.1f", it / 1609.34)} mi out"
+                else "${it.roundToInt()}m out"
+            } ?: "Tunnel/Live ETA"
+            fireHeadlessApproachingAlert(secs, distDesc)
+        }
+
+        if (shouldFireArriving) {
             hasFiredWakeUpAlarm = true
-            fireHeadlessArrivalAlarm("Within ${distToDest.toInt()}m of $destShortName")
-            recordBackgroundDelta(lastSignalSource = "Silent GPS Geofence")
+            stateChanged = true
+            val reason = if (gpsFresh && extrapDist != null) {
+                val secs = (fusedEtaSec ?: 10.0).roundToInt().coerceIn(0, 15)
+                "~${if (secs <= 2) "Arriving" else "${secs}s"} • ${extrapDist.roundToInt()}m to $destShortName"
+            } else {
+                "~10s to $destShortName (Live ETA)"
+            }
+            fireHeadlessArrivalAlarm(reason)
+        }
+
+        // Only mark physically Arrived at platform once <= 115m
+        if (rem > 0 && pastOriginGuard && gpsFresh && extrapDist != null && extrapDist <= PLATFORM_ARRIVED_MARK_RADIUS_METERS) {
+            advanceHeadlessStop(stops.lastIndex, "Silent GPS Platform (${extrapDist.toInt()}m)")
+            return
+        }
+
+        if (stateChanged) {
+            recordBackgroundDelta(
+                lastSignalSource = if (gpsFresh) "Silent GPS Physics" else "Silent Delay-Calibrated ETA"
+            )
+            updateForegroundNotification(
+                title = defaultNotificationTitle(),
+                body = defaultNotificationBody(),
+                subText = defaultNotificationSubText()
+            )
+            lastLiveNotifUpdateMs = nowMs
+        } else if (!isUiAttached && rem > 0 && needPrecision && (nowMs - lastLiveNotifUpdateMs) >= 4_000L) {
+            updateForegroundNotification(
+                title = defaultNotificationTitle(),
+                body = defaultNotificationBody(),
+                subText = defaultNotificationSubText()
+            )
+            lastLiveNotifUpdateMs = nowMs
         }
     }
 
@@ -1004,12 +1458,14 @@ class CommuteForegroundService : Service() {
         if (clamped <= currentStopIndex) return
 
         currentStopIndex = clamped
+        val nowMs = System.currentTimeMillis()
+        recordHeadlessStopPassed(clamped, nowMs)
         val rem = stopsRemaining()
         val currentStop = stops[clamped]
         val isSakura = mascotPersonality == "sakura"
 
         if (rem == 0 && arrivedAtEpochMs == 0L) {
-            arrivedAtEpochMs = System.currentTimeMillis()
+            arrivedAtEpochMs = nowMs
             stopNativeGpsUpdates()
         }
 
@@ -1022,7 +1478,7 @@ class CommuteForegroundService : Service() {
         if (!notifiedStopIndices.contains(clamped)) {
             notifiedStopIndices.add(clamped)
             if (rem == 0) {
-                if (!hasFiredWakeUpAlarm) {
+                if (finalWakeUpAlarm && !hasFiredWakeUpAlarm) {
                     hasFiredWakeUpAlarm = true
                     fireHeadlessArrivalAlarm("Arrived at $destShortName!")
                 }
@@ -1037,7 +1493,7 @@ class CommuteForegroundService : Service() {
                     if (isSakura) {
                         "★ Passing ${currentStop.name}! $destShortName is NEXT (ETA $arrivalTime)! Pack up & head to the doors~ ♪"
                     } else {
-                        "⚡ Passed ${currentStop.name}. $destShortName is the NEXT stop (ETA $arrivalTime). Time to stand up!"
+                        "⚡ Passed ${currentStop.name}. $destShortName is the NEXT stop (ETA $arrivalTime). Approaching alert armed!"
                     }
                 } else {
                     if (isSakura) {
@@ -1049,7 +1505,7 @@ class CommuteForegroundService : Service() {
                 CommuteAlertHelper.showCommuteAlertNotification(
                     context = this,
                     id = (System.currentTimeMillis() % 100000).toInt(),
-                    type = if (isOneStopAway) "arrival" else "stop",
+                    type = "stop",
                     title = title,
                     body = body,
                     vibrate = vibrateOnAlerts,
@@ -1069,24 +1525,48 @@ class CommuteForegroundService : Service() {
             }
         }
 
+        // If we just moved to 1 stop away, immediately upgrade GPS to 1Hz precision mode!
+        if (!isUiAttached && rem == 1 && !gpsInPrecisionMode) {
+            startNativeGpsUpdatesIfPermitted(precision = true)
+        }
+
         recordBackgroundDelta(
             lastSignalSource = source,
             arrived = (rem == 0)
         )
     }
 
+    private fun fireHeadlessApproachingAlert(etaSeconds: Int, distDesc: String) {
+        val isSakura = mascotPersonality == "sakura"
+        val etaLabel = formatCountdownLabel(etaSeconds)
+        val body = if (isSakura) {
+            "★ ~$etaLabel ($distDesc) to $destShortName! Pack up your bag & get ready to stand up~ ♪"
+        } else {
+            "✦ ~$etaLabel ($distDesc) to $destShortName. Gather your things — final Arriving alert fires at ~10s!"
+        }
+        CommuteAlertHelper.showCommuteAlertNotification(
+            context = this,
+            id = (System.currentTimeMillis() % 100000).toInt(),
+            type = "approaching",
+            title = "⏳ APPROACHING ${destShortName.uppercase()} (~$etaLabel)",
+            body = body,
+            vibrate = vibrateOnAlerts,
+            headphoneAudioBypass = headphoneAudioBypass
+        )
+    }
+
     private fun fireHeadlessArrivalAlarm(reason: String) {
         val isSakura = mascotPersonality == "sakura"
         val body = if (isSakura) {
-            "★ $reason! Check your seat for your phone, headphones & bag before stepping off~ ♪"
+            "★ $reason! Stand up NOW & head to the doors — check your seat before stepping off~ ♪"
         } else {
-            "⚡ $reason! Grab your bag and step onto the platform safely."
+            "⚡ $reason! GET UP NOW and head to the doors at $destShortName!"
         }
         CommuteAlertHelper.showCommuteAlertNotification(
             context = this,
             id = (System.currentTimeMillis() % 100000).toInt(),
             type = "arrival",
-            title = "🎉 ARRIVING AT ${destShortName.uppercase()}!",
+            title = "🚨 ARRIVING AT ${destShortName.uppercase()} NOW!",
             body = body,
             vibrate = true,
             headphoneAudioBypass = headphoneAudioBypass
@@ -1112,7 +1592,10 @@ class CommuteForegroundService : Service() {
                 .putString(KEY_BG_TRAIN_ID, trainId)
                 .putInt(KEY_BG_STOP_INDEX, currentStopIndex)
                 .putString(KEY_BG_NOTIFIED_INDICES, notifiedArr.toString())
+                .putBoolean(KEY_BG_FIRED_APPROACHING, hasFiredApproachingAlert)
                 .putBoolean(KEY_BG_FIRED_WAKEUP, hasFiredWakeUpAlarm)
+                .putInt(KEY_BG_OBSERVED_DELAY_SEC, observedDelaySeconds)
+                .putBoolean(KEY_BG_HAS_DELAY_ANCHOR, hasObservedStopAnchor)
                 .putBoolean(KEY_BG_ARRIVED, arrived)
             if (lastSignalSource != null) editor.putString(KEY_BG_SIGNAL_SOURCE, lastSignalSource)
             if (detectedTrack != null) editor.putString(KEY_BG_DETECTED_TRACK, detectedTrack)
